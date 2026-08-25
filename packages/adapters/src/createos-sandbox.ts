@@ -376,7 +376,9 @@ print(json.dumps(out))
     } finally {
       this.dirtyWorkspaces.delete(computer.providerRef);
       if (context.operationId !== "stop" && context.operationId !== "computer.sleep") {
-        await this.launchBrowser(computer, reopenUri, context, { settleMs: 0 }).catch(() => undefined);
+        await this.launchBrowser(computer, reopenUri, context, { settleMs: 0 }).catch(
+          () => undefined,
+        );
       }
     }
   }
@@ -570,7 +572,7 @@ print(json.dumps(out))
         [
           `mkdir -p ${shellQuote(profile)} /tmp/runtime-desktop`,
           `chown -R desktop:desktop ${shellQuote(profile)} /tmp/runtime-desktop`,
-            "chmod 700 /tmp/runtime-desktop",
+          "chmod 700 /tmp/runtime-desktop",
           [
             "if pgrep -u desktop -f 'chrome|chromium' >/dev/null; then",
             [
@@ -596,11 +598,7 @@ print(json.dumps(out))
               shellQuote(`${profile}/SingletonCookie`),
             ].join(" "),
             "&&",
-            [
-              "python3 -c",
-              shellQuote(CHROME_CLEAN_EXIT_SCRIPT),
-              shellQuote(profile),
-            ].join(" "),
+            ["python3 -c", shellQuote(CHROME_CLEAN_EXIT_SCRIPT), shellQuote(profile)].join(" "),
             "&&",
             [
               "setsid",
@@ -742,12 +740,7 @@ for tab in tabs:
     context: AdapterContext,
     timeoutMs = boundedSandboxCommandTimeoutMs(undefined),
   ) {
-    const result = await this.runCommand(
-      computer,
-      { argv },
-      context,
-      timeoutMs,
-    );
+    const result = await this.runCommand(computer, { argv }, context, timeoutMs);
     if ((result.result?.exit_code ?? 1) !== 0) {
       throw new Error(result.result?.stderr || result.result?.error || "CreateOS command failed");
     }
@@ -832,7 +825,9 @@ for tab in tabs:
     if (payload.status && payload.status !== "success") {
       throw new Error(
         payload.message ||
-          (typeof payload.data === "string" ? payload.data : "CreateOS response was not successful"),
+          (typeof payload.data === "string"
+            ? payload.data
+            : "CreateOS response was not successful"),
       );
     }
     if (payload.data !== undefined) return payload.data as T;
