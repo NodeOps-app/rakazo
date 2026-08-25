@@ -36,6 +36,7 @@ const CREATEOS_WORKSPACE = "/home/desktop/rakazo-home";
 const DEFAULT_CREATEOS_BASE_URL = "https://api.sb.createos.sh";
 const DEFAULT_CREATEOS_SHAPE = "s-2vcpu-2gb";
 const DEFAULT_CREATEOS_ROOTFS = "desktop:1";
+const TRANSITIONAL_CREATEOS_STATUSES = new Set(["pausing", "resuming"]);
 const CHROME_CLEAN_EXIT_SCRIPT = `
 import json, os, sys
 profile = sys.argv[1]
@@ -125,7 +126,7 @@ export class CreateOSSandboxProvider implements SandboxProvider {
   ): Promise<ComputerRef> {
     if (request.providerRef && request.providerKind === "createos") {
       try {
-        const existing = await this.getSandbox(request.providerRef, context);
+        const existing = await this.waitUntilSettled(request.providerRef, context);
         if (existing.status === "destroyed" || existing.status === "failed") {
           throw new Error(`CreateOS sandbox is ${existing.status}`);
         }
@@ -792,6 +793,19 @@ for tab in tabs:
 
   private async getSandbox(id: string, context: AdapterContext): Promise<CreateOSView> {
     return this.getJson<CreateOSView>(`/v1/sandboxes/${encodeURIComponent(id)}`, context);
+  }
+
+  /**
+   * stop() returns while the control plane still reports "pausing". Resume is only
+   * valid once that transition finishes, so settle first and act on the final status.
+   */
+  private async waitUntilSettled(id: string, context: AdapterContext): Promise<CreateOSView> {
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      const current = await this.getSandbox(id, context);
+      if (!TRANSITIONAL_CREATEOS_STATUSES.has(current.status)) return current;
+      await delay(1_000, undefined, { signal: context.signal });
+    }
+    throw new Error("CreateOS sandbox did not settle");
   }
 
   private async waitUntilRunning(id: string, context: AdapterContext): Promise<void> {
