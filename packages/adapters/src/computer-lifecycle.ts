@@ -155,11 +155,13 @@ export async function provisionComputer(
 
 async function reconnectComputer(
   deps: {
+    prisma: PrismaClient;
     sandbox: SandboxProvider;
     home: AgentHomeStore;
     dataDir?: string;
   },
   computer: {
+    id: string;
     homeKey: string;
     providerRef: string | null;
     kind: string;
@@ -178,6 +180,14 @@ async function reconnectComputer(
     context,
   );
   await deps.sandbox.prepare(ref, context);
+  const replacement =
+    ref.fresh === true ||
+    !computer.providerRef ||
+    computer.providerRef !== ref.providerRef ||
+    computer.kind !== ref.kind;
+  if (replacement) {
+    await restoreComputerWorkspace(deps.home, deps.sandbox, computer.homeKey, ref, context);
+  }
   await ensureComputerWorkspaceLayout(
     deps.sandbox,
     ref,
@@ -185,6 +195,19 @@ async function reconnectComputer(
     context.botId,
     context,
   );
+  if (replacement) {
+    await deps.prisma.computer.updateMany({
+      where: {
+        id: computer.id,
+        state: "running",
+        providerRef: computer.providerRef,
+      },
+      data: {
+        providerRef: ref.providerRef,
+        kind: ref.kind,
+      },
+    });
+  }
   return ref;
 }
 

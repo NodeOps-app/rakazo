@@ -1,6 +1,7 @@
 import type { SandboxProvider } from "@rakazo/adapter-kit";
 import { BoxSandboxEmulator } from "./box-emulator.js";
 import { BoxSandboxProvider } from "./box-sandbox.js";
+import { CreateOSSandboxProvider } from "./createos-sandbox.js";
 import { DaytonaSandboxEmulator } from "./daytona-emulator.js";
 import { DaytonaSandboxProvider } from "./daytona-sandbox.js";
 import { DesktopSandboxProvider } from "./desktop-sandbox.js";
@@ -16,6 +17,10 @@ export interface SandboxProviderOptions {
   daytonaApiKey?: string;
   daytonaApiUrl?: string;
   daytonaTarget?: string;
+  createosApiKey?: string;
+  createosBaseUrl?: string;
+  createosShape?: string;
+  createosRootfs?: string;
   boxApiKey?: string;
   boxApiUrl?: string;
   dataDir?: string;
@@ -34,6 +39,16 @@ export function createSandboxProvider(kind: string, opts: SandboxProviderOptions
         apiKey: opts.daytonaApiKey,
         apiUrl: opts.daytonaApiUrl,
         target: opts.daytonaTarget,
+      });
+    case "createos":
+      if (!opts.createosApiKey) {
+        throw new Error("CREATEOS_SANDBOX_API_KEY is required for the createos sandbox provider");
+      }
+      return new CreateOSSandboxProvider({
+        apiKey: opts.createosApiKey,
+        baseUrl: opts.createosBaseUrl,
+        shape: opts.createosShape,
+        rootfs: opts.createosRootfs,
       });
     case "box":
       if (!opts.boxApiKey) throw new Error("BOX_API_KEY is required for the box sandbox provider");
@@ -57,7 +72,7 @@ export function createSandboxProvider(kind: string, opts: SandboxProviderOptions
       return new FakeSandboxProvider();
     default:
       throw new Error(
-        `Unknown SANDBOX_PROVIDER "${kind}". Use docker | e2b | daytona | box | e2b-emulator | daytona-emulator | box-emulator | desktop | fake.`,
+        `Unknown SANDBOX_PROVIDER "${kind}". Use docker | e2b | daytona | createos | box | e2b-emulator | daytona-emulator | box-emulator | desktop | fake.`,
       );
   }
 }

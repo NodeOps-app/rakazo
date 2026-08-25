@@ -20,7 +20,7 @@ Rakazo is in beta. Learn more at [rakazo.com](https://rakazo.com).
 - Bots that can delegate to peer bots or short-lived subagents
 - Bring-your-own model credentials through Pi
 - App integrations through Composio or Pipedream Connect, plus user-installed Treg, remote MCP, and OpenAPI tool sources
-- Docker, E2B, Daytona, and trusted local-computer support
+- Docker, E2B, Daytona, CreateOS, and trusted local-computer support
 
 ## Demo
 
@@ -36,7 +36,7 @@ https://github.com/user-attachments/assets/dccdeddb-2134-4a56-8eed-b2e591736b1c
 - Better Auth
 - Graphile Worker
 - Pi
-- Docker, E2B, and Daytona
+- Docker, E2B, Daytona, and CreateOS
 - Composio, Pipedream Connect, MCP, and OpenAPI integrations
 
 ## Quick start
@@ -76,6 +76,11 @@ your first bot.
 
 For an agent-assisted installation, use [SETUP_PROMPT.md](./SETUP_PROMPT.md). For deployment,
 provider selection, backups, and upgrades, see the [self-hosting guide](./docs/self-host.md).
+
+To use CreateOS for bot computers, set `SANDBOX_PROVIDER=createos` and provide
+`CREATEOS_SANDBOX_API_KEY`. By default Rakazo talks to `https://api.sb.createos.sh`, creates
+`desktop:1` sandboxes with the `s-2vcpu-2gb` shape, and keeps portable workspace checkpoints in
+`DATA_DIR`.
 
 ## Desktop and mobile
 
@@ -137,7 +142,8 @@ COMPUTER_E2E_MODEL=<vision-capable-openrouter-model-id> pnpm test:computer
 
 The Playwright workflow can also be started manually with **Sandbox provider** set to `e2b`, `daytona`, or `box`.
 Those options require `E2B_API_KEY`, `DAYTONA_API_KEY`, or `BOX_API_KEY`, keep the deterministic scripted agent runtime, and destroy
-the provider machines after the run. The default and all automatic runs remain on `fake`.
+the provider machines after the run. The default and all automatic runs remain on `fake`. CreateOS is configured with
+`SANDBOX_PROVIDER=createos` and `CREATEOS_SANDBOX_API_KEY` for local or self-hosted runs.
 Contributions are welcome. Please read [CONTRIBUTING.md](./CONTRIBUTING.md) before opening a pull
 request. For security vulnerabilities, follow [SECURITY.md](./SECURITY.md) instead of filing a public
 issue.

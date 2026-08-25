@@ -20,6 +20,10 @@ export interface AppEnv {
   daytonaApiKey: string | undefined;
   daytonaApiUrl: string | undefined;
   daytonaTarget: string | undefined;
+  createosApiKey: string | undefined;
+  createosBaseUrl: string | undefined;
+  createosShape: string | undefined;
+  createosRootfs: string | undefined;
   boxApiKey: string | undefined;
   boxApiUrl: string | undefined;
   composioApiKey: string | undefined;
@@ -58,6 +62,10 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     daytonaApiKey: source.DAYTONA_API_KEY,
     daytonaApiUrl: source.DAYTONA_API_URL,
     daytonaTarget: source.DAYTONA_TARGET,
+    createosApiKey: source.CREATEOS_SANDBOX_API_KEY ?? source.CREATEOS_API_KEY,
+    createosBaseUrl: source.CREATEOS_SANDBOX_BASE_URL ?? source.CREATEOS_API_URL,
+    createosShape: source.CREATEOS_SANDBOX_SHAPE,
+    createosRootfs: source.CREATEOS_SANDBOX_ROOTFS,
     boxApiKey: source.BOX_API_KEY,
     boxApiUrl: source.BOX_API_URL ?? source.BOX_BASE_URL,
     composioApiKey: source.COMPOSIO_API_KEY,

@@ -1,6 +1,10 @@
 import type { ComputerStatus } from "@rakazo/contracts";
 import { computerScreenSize } from "@rakazo/core";
 
+function normalizeComputerKind(kind: string | undefined): ComputerStatus["kind"] {
+  return (kind ?? "fake") as ComputerStatus["kind"];
+}
+
 export function toComputerStatus(
   botId: string,
   computer: {
@@ -27,7 +31,7 @@ export function toComputerStatus(
   return {
     botId,
     mode: computer?.scope === "dedicated" ? "dedicated" : "team",
-    kind: (computer?.kind ?? "fake") as ComputerStatus["kind"],
+    kind: normalizeComputerKind(computer?.kind),
     state,
     controlHolder: (computer?.controlHolder ?? "none") as ComputerStatus["controlHolder"],
     controlBotId: computer?.controlBotId ?? null,
