@@ -110,6 +110,7 @@ export class DesktopSandboxProvider implements SandboxProvider {
     const result = await runCommand(
       argv,
       cwd,
+      box.home,
       boundedSandboxCommandTimeoutMs(request.timeoutMs),
       context.signal,
     );
@@ -329,13 +330,14 @@ function allowedPath(target: string, roots: string[]) {
 function runCommand(
   argv: string[],
   cwd: string,
+  home: string,
   timeoutMs: number,
   signal: AbortSignal,
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   return new Promise((resolve) => {
     const child = spawn(argv[0]!, argv.slice(1), {
       cwd,
-      env: process.env,
+      env: { ...process.env, HOME: home },
       detached: process.platform !== "win32",
     });
     let stdout = "";

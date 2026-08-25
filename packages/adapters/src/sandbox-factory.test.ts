@@ -19,13 +19,17 @@ describe("createSandboxProvider", () => {
   it("requires provider-specific credentials", () => {
     expect(() => createSandboxProvider("e2b", {})).toThrow(/E2B_API_KEY/);
     expect(() => createSandboxProvider("daytona", {})).toThrow(/DAYTONA_API_KEY/);
+    expect(() => createSandboxProvider("createos", {})).toThrow(/CREATEOS_SANDBOX_API_KEY/);
     expect(() => createSandboxProvider("box", {})).toThrow(/BOX_API_KEY/);
+    expect(
+      createSandboxProvider("createos", { createosApiKey: "test-createos-key" }).describe().id,
+    ).toBe("createos");
     expect(createSandboxProvider("box", { boxApiKey: "test-box-key" }).describe().id).toBe("box");
   });
 
   it("throws on unknown provider", () => {
     expect(() => createSandboxProvider("bogus", {})).toThrow(
-      'Unknown SANDBOX_PROVIDER "bogus". Use docker | e2b | daytona | box | e2b-emulator | daytona-emulator | box-emulator | desktop | fake.',
+      'Unknown SANDBOX_PROVIDER "bogus". Use docker | e2b | daytona | createos | box | e2b-emulator | daytona-emulator | box-emulator | desktop | fake.',
     );
   });
 });
