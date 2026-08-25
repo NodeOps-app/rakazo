@@ -98,6 +98,18 @@ describe("CreateOSSandboxProvider", () => {
     expect(fixture.calls).not.toContain("POST /v1/sandboxes");
   });
 
+  it("lets a pausing sandbox settle before it resumes", async () => {
+    const fixture = createosFixture({ statuses: ["pausing", "pausing", "paused", "running"] });
+    const ref = await provider(fixture).provision(
+      { botId: "bot-a", homePath: "/unused", providerRef: "sbx-1", providerKind: "createos" },
+      context,
+    );
+
+    expect(ref.fresh).toBe(false);
+    expect(fixture.calls).toContain("POST /v1/sandboxes/sbx-1/resume");
+    expect(fixture.calls).not.toContain("POST /v1/sandboxes");
+  });
+
   it("waits for an existing sandbox that is neither running nor paused", async () => {
     const fixture = createosFixture({ statuses: ["starting", "running"] });
     await provider(fixture).provision(
