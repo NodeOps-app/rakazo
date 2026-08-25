@@ -16,6 +16,7 @@ import type {
   ScreenSession,
 } from "@rakazo/adapter-kit";
 import { boundedSandboxCommandTimeoutMs } from "@rakazo/core";
+import { sandboxIdleMs } from "./computer-idle.js";
 import { screenSessionKey } from "./computer-screens.js";
 import {
   boundedComputerActions,
@@ -134,8 +135,8 @@ export class CreateOSSandboxProvider implements SandboxProvider {
             undefined,
             context,
           );
-          await this.waitUntilRunning(existing.id, context);
         }
+        if (existing.status !== "running") await this.waitUntilRunning(existing.id, context);
         return this.ref(existing.id, request.botId, false);
       } catch (error) {
         if (!isUnrecoverableCreateOSError(error)) throw error;
@@ -148,7 +149,7 @@ export class CreateOSSandboxProvider implements SandboxProvider {
         shape: this.shape,
         rootfs: this.rootfs,
         ingress_enabled: true,
-        auto_pause_after_seconds: Math.max(60, Math.ceil(createosIdleMs() / 1_000)),
+        auto_pause_after_seconds: Math.max(60, Math.ceil(sandboxIdleMs() / 1_000)),
       },
       context,
     );
@@ -184,7 +185,15 @@ export class CreateOSSandboxProvider implements SandboxProvider {
   ): AsyncIterable<ProcessEvent> {
     this.dirtyWorkspaces.add(computer.providerRef);
     const timeoutMs = boundedSandboxCommandTimeoutMs(request.timeoutMs);
-    const result = await this.runCommand(computer, request, context, timeoutMs);
+    let result: CreateOSExecResponse;
+    try {
+      result = await this.runCommand(computer, request, context, timeoutMs);
+    } catch (error) {
+      if (context.signal.aborted || !isTimeoutAbort(error)) throw error;
+      yield { type: "stderr", data: `command timed out after ${timeoutMs} ms\n` };
+      yield { type: "exit", code: 124 };
+      return;
+    }
     if (result.result?.stdout) yield { type: "stdout", data: result.result.stdout };
     if (result.result?.stderr) yield { type: "stderr", data: result.result.stderr };
     if (result.result?.error) yield { type: "stderr", data: `${result.result.error}\n` };
@@ -424,6 +433,7 @@ print(json.dumps(out))
   }
 
   async stop(computer: ComputerRef, context: AdapterContext): Promise<void> {
+    this.forget(computer.providerRef);
     await this.postJson(
       `/v1/sandboxes/${encodeURIComponent(computer.providerRef)}/pause`,
       undefined,
@@ -432,13 +442,19 @@ print(json.dumps(out))
   }
 
   async destroy(computer: ComputerRef, context: AdapterContext): Promise<void> {
-    this.screenAssignments.delete(computer.providerRef);
+    this.forget(computer.providerRef);
     await this.request(
       "DELETE",
       `/v1/sandboxes/${encodeURIComponent(computer.providerRef)}`,
       undefined,
       context,
     );
+  }
+
+  private forget(id: string): void {
+    this.screenAssignments.delete(id);
+    this.lastBrowserUris.delete(id);
+    this.dirtyWorkspaces.delete(id);
   }
 
   private ref(id: string, botId: string, fresh: boolean): ComputerRef {
@@ -473,6 +489,8 @@ print(json.dumps(out))
     action: ComputerAction | ComputerInput,
     context: AdapterContext,
   ): Promise<void> {
+    // GUI actions change the workspace as much as commands do, so export must see them.
+    this.dirtyWorkspaces.add(computer.providerRef);
     const screenId = await this.resolveScreen(computer, context);
     const root = `/v1/sandboxes/${encodeURIComponent(computer.providerRef)}/computer`;
     const query = `screen_id=${encodeURIComponent(screenId)}`;
@@ -910,6 +928,10 @@ class CreateOSHttpError extends Error {
   }
 }
 
+function isTimeoutAbort(error: unknown): boolean {
+  return error instanceof Error && error.name === "TimeoutError";
+}
+
 function isTransientCreateOSHttpStatus(status: number): boolean {
   return status === 408 || status === 429 || status === 502 || status === 503 || status === 504;
 }
@@ -928,11 +950,6 @@ function createosCwd(cwd: string | undefined): string {
   }
   if (cwd === CREATEOS_WORKSPACE || cwd.startsWith(`${CREATEOS_WORKSPACE}/`)) return cwd;
   return workspacePath(CREATEOS_WORKSPACE, cwd);
-}
-
-function createosIdleMs(): number {
-  const value = Number(process.env.SANDBOX_IDLE_MS ?? 10 * 60_000);
-  return Number.isFinite(value) && value > 0 ? value : 10 * 60_000;
 }
 
 function isBrowserApplication(application: string): boolean {
