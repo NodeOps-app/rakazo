@@ -20,7 +20,7 @@ Rakazo is in beta. Learn more at [rakazo.com](https://rakazo.com).
 - Bots that can delegate to peer bots or short-lived subagents
 - Bring-your-own model credentials through Pi
 - App integrations through Composio or Pipedream Connect, plus user-installed Treg, remote MCP, and OpenAPI tool sources
-- Docker, E2B, Daytona, Box, and trusted local-computer support
+- Docker, E2B, Daytona, CreateOS, Box, and trusted local-computer support
 
 ## Demo
 
@@ -36,7 +36,7 @@ https://github.com/user-attachments/assets/dccdeddb-2134-4a56-8eed-b2e591736b1c
 - Better Auth
 - Graphile Worker
 - Pi
-- Docker, E2B, Daytona, and Box
+- Docker, E2B, Daytona, CreateOS, and Box
 - Composio, Pipedream Connect, MCP, and OpenAPI integrations
 
 ## Quick start (published images)
@@ -134,6 +134,11 @@ your first bot.
 
 For deployment, provider selection, backups, and upgrades, see the
 [self-hosting guide](./docs/self-host.md).
+
+To use CreateOS for bot computers, set `SANDBOX_PROVIDER=createos` and provide
+`CREATEOS_SANDBOX_API_KEY`. By default Rakazo talks to `https://api.sb.createos.sh`, creates
+`desktop:1` sandboxes with the `s-2vcpu-2gb` shape, and keeps portable workspace checkpoints in
+`DATA_DIR`.
 
 ## Desktop and mobile
 
