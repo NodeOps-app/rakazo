@@ -15,7 +15,7 @@ function adapterContext(actor: Actor, botId: string, operationId: string) {
   return {
     operationId,
     traceId: operationId,
-    workspaceId: actor.workspaceId,
+    spaceId: actor.spaceId,
     userId: actor.userId,
     botId,
     signal: new AbortController().signal,
@@ -47,7 +47,7 @@ export async function createOwnedArtifact(
   const row = await deps.prisma.artifact
     .create({
       data: {
-        workspaceId: actor.workspaceId,
+        spaceId: actor.spaceId,
         userId: actor.userId,
         botId: input.botId,
         groupId: input.groupId,
@@ -87,7 +87,7 @@ export async function getOwnedArtifact(
       id: input.artifactId,
       botId: input.botId,
       groupId: null,
-      workspaceId: actor.workspaceId,
+      spaceId: actor.spaceId,
       userId: actor.userId,
     },
   });
@@ -95,7 +95,7 @@ export async function getOwnedArtifact(
   return readArtifact(deps.artifacts, actor, row, input.botId);
 }
 
-export async function getWorkspaceArtifact(
+export async function getSpaceArtifact(
   deps: {
     prisma: PrismaClient;
     artifacts: ArtifactStore;
@@ -107,7 +107,7 @@ export async function getWorkspaceArtifact(
     where: {
       id: input.artifactId,
       groupId: input.groupId,
-      workspaceId: actor.workspaceId,
+      spaceId: actor.spaceId,
       userId: actor.userId,
     },
   });
@@ -193,7 +193,7 @@ export async function resolveSendAttachments(
       id: { in: ids },
       botId,
       groupId: null,
-      workspaceId: actor.workspaceId,
+      spaceId: actor.spaceId,
       userId: actor.userId,
     },
   });
@@ -213,7 +213,7 @@ export async function resolveGroupSendAttachments(
   const rows = await deps.prisma.artifact.findMany({
     where: {
       id: { in: ids },
-      workspaceId: actor.workspaceId,
+      spaceId: actor.spaceId,
       userId: actor.userId,
       OR: [
         { groupId },
@@ -240,6 +240,22 @@ export function buildUserMessageBlocks(
 export function buildSendPrompt(
   text: string | undefined,
   artifacts: Array<{ name: string; mimeType: string; size: number }>,
+  connectorNames: string[] = [],
 ) {
-  return promptTextForAttachments(text, artifacts);
+  const prompt = promptTextForAttachments(text, artifacts);
+  if (connectorNames.length === 0) return prompt;
+  const marker = "Use these connectors if relevant:";
+  const existing = new RegExp(`^${marker} (.*)\\.$`, "m").exec(prompt);
+  const names = [
+    ...new Set([
+      ...(existing?.[1]
+        ?.split(",")
+        .map((name) => name.trim())
+        .filter(Boolean) ?? []),
+      ...connectorNames.map((name) => name.trim()).filter(Boolean),
+    ]),
+  ];
+  const line = `${marker} ${names.join(", ")}.`;
+  if (existing) return prompt.replace(existing[0], () => line);
+  return prompt ? `${prompt}\n\n${line}` : line;
 }

@@ -1,3 +1,4 @@
+import { Trans } from "@lingui/react/macro";
 import type { TaughtSkill } from "@rakazo/contracts";
 import { Button } from "@rakazo/ui-web";
 import { useEffect, useState } from "react";
@@ -38,12 +39,14 @@ export function TeachRecordingChrome({
         data-testid="teach-recording-overlay"
         className="flex min-w-0 flex-1 flex-col gap-1 px-3"
       >
-        <div className="truncate text-[13px] text-[#ECECEE]">Recording: {recording.goal}</div>
-        <div className="text-[12px] text-[#85858A]">
-          {remaining} left · bot is watching, not acting
+        <div className="truncate text-[13px] text-foreground">
+          <Trans>Recording: {recording.goal}</Trans>
         </div>
-        <div className="text-[12px] text-[#E65707]">
-          Do not type passwords into the demo. Use Take control for credentials.
+        <div className="text-[12px] text-muted-foreground">
+          <Trans>{remaining} left · bot is watching, not acting</Trans>
+        </div>
+        <div className="text-[12px] text-destructive">
+          <Trans>Do not type passwords into the demo. Use Take control for credentials.</Trans>
         </div>
       </div>
     );
@@ -52,14 +55,16 @@ export function TeachRecordingChrome({
   return (
     <div
       data-testid="teach-recording"
-      className="rounded-[11px] border border-[#232326] bg-[#121214] px-3 py-3"
+      className="rounded-[11px] border border-border bg-card px-3 py-3"
     >
-      <div className="text-[14px] text-[#ECECEE]">Recording: {recording.goal}</div>
-      <div className="mt-1 text-[13px] text-[#85858A]">
-        {remaining} left · bot is watching, not acting
+      <div className="text-[14px] text-foreground">
+        <Trans>Recording: {recording.goal}</Trans>
       </div>
-      <div className="mt-2 text-[13px] text-[#E65707]">
-        Do not type passwords into the demo. Use Take control for credentials.
+      <div className="mt-1 text-[13px] text-muted-foreground">
+        <Trans>{remaining} left · bot is watching, not acting</Trans>
+      </div>
+      <div className="mt-2 text-[13px] text-destructive">
+        <Trans>Do not type passwords into the demo. Use Take control for credentials.</Trans>
       </div>
       <Button
         type="button"
@@ -70,7 +75,7 @@ export function TeachRecordingChrome({
         data-testid="teach-stop-button"
         onClick={() => void onStop()}
       >
-        Stop teaching
+        <Trans>Stop teaching</Trans>
       </Button>
     </div>
   );
@@ -92,7 +97,7 @@ export function TeachStopButton({
       data-testid="teach-stop-overlay"
       onClick={() => void onStop()}
     >
-      Stop teaching
+      <Trans>Stop teaching</Trans>
     </Button>
   );
 }

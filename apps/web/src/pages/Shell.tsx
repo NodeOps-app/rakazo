@@ -1,75 +1,122 @@
+import { i18n } from "@lingui/core";
+import { t } from "@lingui/core/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { ChatMarkdown } from "@rakazo/chat-ui/web";
 import type {
+  AgentSkillCatalogEntry,
   Bot,
   BotSection,
   ComputerMode,
   ComputerReleaseReason,
   ComputerStatus,
+  Connection,
+  ConnectionCatalogItem,
   Group,
   Me,
-  MessageBlock,
   ProductEvent,
   Routine,
   SearchHit,
+  Space,
+  SpaceMemoryConfig,
   TaughtSkill,
   ThreadMessage,
   ThreadSnapshot,
-  VoiceInfo,
   VoiceStatus,
-  WorkspaceMemoryConfig,
 } from "@rakazo/contracts";
 import {
   ATTACHMENT_ALLOWED_MIME_TYPES,
   ATTACHMENT_MAX_BYTES,
   ATTACHMENT_MAX_COUNT,
-  BOT_DESCRIPTION_MAX_LENGTH,
-  BOT_NAME_MAX_LENGTH,
-  BOT_TITLE_MAX_LENGTH,
+  canReactToThreadMessage,
+  MESSAGE_REACTIONS,
+  type MessageReaction,
   normalizeCreateBotProfile,
 } from "@rakazo/contracts";
 import {
-  abortableDelay,
   attachmentsForThread,
+  buildComposerMentionOptions,
+  type ComposerMention,
+  clampMentionHighlightIndex,
   cronFromPreset,
-  defaultCronPreset,
-  formatCron,
   groupBotsForSidebar,
-  hasMentionToken,
   inferAttachmentMimeType,
   isActive,
+  isPeerReceiptBlocks,
   isRunTerminalEvent,
+  isToolActivityBlock,
   latestAnswerableAskMessageId,
-  presetFromCron,
+  mentionChipKey,
+  projectMessageReactions,
+  reorderBotTo,
+  resolveComposerSendPlan,
+  resolveMentionPickerKey,
+  runThreadSubscription,
+  SLASH_ACTIONS,
+  type SlashActionId,
+  searchHitThreadTarget,
+  serializeComposerPrompt,
   speechFromBlocks,
+  truncateSlashDescription,
+  userVisibleMessages,
 } from "@rakazo/core";
-import { BotAvatar, Button, GroupAvatar } from "@rakazo/ui-web";
 import {
+  AvatarStyleProvider,
+  BotAvatar,
+  Button,
+  cn,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  GroupAvatar,
+  type GroupAvatarMember,
+  InputGroup,
+  InputGroupAddon,
+  InputGroupInput,
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@rakazo/ui-web";
+import {
+  ArrowDown,
   ArrowUp,
-  ChevronLeft,
-  Cpu,
+  Bell,
+  Box,
+  ChevronDown,
+  Clock,
+  Copy,
   Gauge,
+  Lock,
   LogOut,
+  Maximize2,
   Menu,
   Mic,
   Monitor,
+  MoreHorizontal,
+  PanelLeftClose,
+  PanelLeftOpen,
   Paperclip,
-  Phone,
   Plus,
   Puzzle,
+  Reply,
+  Search,
   Settings,
+  Smile,
   Square,
-  Volume2,
+  Trash2,
   X,
 } from "lucide-react";
 import {
-  type Dispatch,
+  type ClipboardEvent,
+  type DragEvent,
   lazy,
+  type MutableRefObject,
   memo,
   type RefObject,
-  type SetStateAction,
   Suspense,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -78,70 +125,125 @@ import {
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ArtifactFileCard } from "../components/ArtifactFileCard";
 import { AskCard } from "../components/AskCard";
+import { ActiveBotGlyph, CollaborationMarker } from "../components/ai/CollaborationMarker";
+import { CloudAgentCard } from "../components/CloudAgentCard";
+import { ComputerMaintenanceActions } from "../components/ComputerMaintenanceActions";
 import {
-  BuiButton,
-  BuiCard,
-  LoadingState,
-  SuccessPop,
-} from "../components/beautiful-ui/primitives";
+  ComputersUnavailableHint,
+  computersAreUnavailable,
+} from "../components/ComputersUnavailableHint";
+import { ComputerUpdateProgress } from "../components/ComputerUpdateProgress";
+import { MessageHoverMetadata } from "../components/MessageHoverMetadata";
 import { SkillDraftCard } from "../components/teach/SkillDraftCard";
 import { TeachCaptureOverlay } from "../components/teach/TeachCaptureOverlay";
-import { TeachComputerSection } from "../components/teach/TeachComputerSection";
+import { TeachComputerOverlayControl } from "../components/teach/TeachComputerOverlay";
 import { TeachRecordingChrome, TeachStopButton } from "../components/teach/TeachRecordingChrome";
-import { type ArtifactTarget, decodeArtifactBase64 } from "../lib/artifact-open";
+import { readActivityMode, writeActivityMode } from "../lib/activity-mode";
+import type { ArtifactTarget } from "../lib/artifact-open";
 import { authClient } from "../lib/auth";
 import { takeInitialBootstrap } from "../lib/bootstrap";
-import { chartViewport } from "../lib/chart-viewport";
-import { dictation } from "../lib/dictation";
-import { connectMcpOauth } from "../lib/mcp-connect";
-import { revokePendingAttachmentPreviews } from "../lib/pending-attachments";
+import {
+  BOTS_SIDEBAR_EDGE_DRAG_PX,
+  readBotsSidebarCollapsed,
+  writeBotsSidebarCollapsed,
+} from "../lib/bots-sidebar-pref";
+import {
+  deliverBrowserNotification as deliverNativeBrowserNotification,
+  requestBrowserNotificationPermission,
+  shouldNotifyBrowser,
+} from "../lib/browser-notifications";
+import { loadComputerScreen } from "../lib/computer-screen";
+import { desktopBridge } from "../lib/desktop";
+import { scheduleFocusPrompt } from "../lib/focus-prompt";
+import { localTimezone } from "../lib/local-timezone";
+import { copyableMessageText } from "../lib/message-text";
+import { messageProviderLabel } from "../lib/messaging";
+import {
+  isFileDrag,
+  isFilePaste,
+  revokePendingAttachmentPreviews,
+} from "../lib/pending-attachments";
 import { markAfterPaint, markOnce } from "../lib/performance";
-import { rpc } from "../lib/rpc";
+import { clearSpaceSelection, rpc, selectedSpaceId, selectSpace } from "../lib/rpc";
+import { readSeenRunErrorIds, rememberSeenRunErrorId } from "../lib/run-error-storage";
+import { sharedInflight } from "../lib/shared-inflight";
 import {
   activeThreadRuns,
+  applyThreadSendReceipt,
+  clearActiveThreadRuns,
   computerPanelAutoBoot,
+  computerPanelAutoUsesBoot,
+  computerPanelNeedsMaintenance,
+  computerTakeoverBlocked,
   isComputerStatusEvent,
   isThreadSnapshotEvent,
-  mergeThreadSnapshot,
   prependThreadMessagePage,
+  reconcileRefreshedThread,
   reduceComputerStatus,
   reduceThreadSnapshot,
+  threadRunError,
   userHoldsComputerControl,
 } from "../lib/thread-events";
+import {
+  transcriptCanSnapAfterFrame,
+  transcriptIsNearEnd,
+  transcriptMovedDown,
+} from "../lib/transcript-scroll";
 import { speaker } from "../lib/tts";
+import { ActivityList } from "./ActivityList";
 import type { ContextMenuPosition } from "./BotContextMenu";
 import { CreateGroupForm, GroupSettings, memberName } from "./GroupPanel";
 import { HostComputerPrompt } from "./HostComputerPrompt";
+import {
+  draftFromRoutine,
+  emptyRoutineDraft,
+  type RoutineDraftState,
+  RoutineEditor,
+  RoutineListHeader,
+  RoutineListRow,
+  routineNeedsOneShotArm,
+} from "./RoutineEditor";
+import type { SettingsSection } from "./SettingsOverlay";
+import { SpaceSearchResults } from "./SpaceSearch";
+import { BotSettings, CreateBotForm } from "./shell/bot-panel";
+import { BotCreatePicker } from "./shell/bot-picker";
+import { CommandPalette, isCommandPaletteHotkey } from "./shell/command-palette";
+import {
+  ClearConversationDialog,
+  DeleteBotDialog,
+  DeleteItemDialog,
+  NewBotSectionDialog,
+  NewSpaceDialog,
+  PickerInfoDialog,
+} from "./shell/dialogs";
+import {
+  AppConnectCard,
+  ArtifactImage,
+  ChartBlockView,
+  ChoiceCard,
+  McpApprovalCard,
+} from "./shell/message-cards";
 import { WindowChrome } from "./WindowChrome";
-import { WorkspaceSearchResults } from "./WorkspaceSearch";
 
 const BotContextMenu = lazy(() =>
   import("./BotContextMenu").then((module) => ({ default: module.BotContextMenu })),
 );
-const AccountSettingsOverlay = lazy(() =>
-  import("./AccountSettingsOverlay").then((module) => ({
-    default: module.AccountSettingsOverlay,
+const MessagingSettingsOverlay = lazy(() =>
+  import("./MessagingSettingsOverlay").then((module) => ({
+    default: module.MessagingSettingsOverlay,
   })),
 );
-const ModelSettingsOverlay = lazy(() =>
-  import("./ModelSettingsOverlay").then((module) => ({ default: module.ModelSettingsOverlay })),
+const SettingsOverlay = lazy(() =>
+  import("./SettingsOverlay").then((module) => ({ default: module.SettingsOverlay })),
+);
+const PeerMessagesOverlay = lazy(() =>
+  import("./PeerMessagesOverlay").then((module) => ({ default: module.PeerMessagesOverlay })),
 );
 const PluginsOverlay = lazy(() =>
   import("./PluginsOverlay").then((module) => ({ default: module.PluginsOverlay })),
 );
 const McpServersOverlay = lazy(() =>
   import("./McpServersOverlay").then((module) => ({ default: module.McpServersOverlay })),
-);
-const MemorySettingsOverlay = lazy(() =>
-  import("./MemorySettingsOverlay").then((module) => ({
-    default: module.MemorySettingsOverlay,
-  })),
-);
-const RoutineSchedule = lazy(() =>
-  import("./RoutineSchedule").then((module) => ({ default: module.RoutineSchedule })),
-);
-const VoiceSettingsOverlay = lazy(() =>
-  import("./VoiceSettingsOverlay").then((module) => ({ default: module.VoiceSettingsOverlay })),
 );
 const CallView = lazy(() => import("./CallView").then((module) => ({ default: module.CallView })));
 
@@ -161,22 +263,90 @@ type PendingAttachment = {
   previewUrl?: string;
 };
 
+type PendingBrowserNotification = {
+  event: Pick<ProductEvent, "id" | "type" | "threadId" | "botId" | "payload">;
+  botId: string;
+  botName: string;
+  groupNotification: boolean;
+};
+
 const ATTACHMENT_ACCEPT = ATTACHMENT_ALLOWED_MIME_TYPES.join(",");
+/** Identity colour for bots the roster no longer knows about. */
+const FALLBACK_BOT_COLOR = "#85858A";
+const THREAD_SNAPSHOT_TIMEOUT_MS = 2_000;
+/** Bound Settings leave so a hung voice status refresh cannot block dismissal. */
+const VOICE_STATUS_REFRESH_TIMEOUT_MS = 10_000;
+const MOBILE_SIDEBAR_SWIPE_EDGE_PX = 32;
+const MOBILE_SIDEBAR_SWIPE_DISTANCE_PX = 56;
+
+function threadSnapshotSignal(parent: AbortSignal): AbortSignal {
+  return AbortSignal.any([parent, AbortSignal.timeout(THREAD_SNAPSHOT_TIMEOUT_MS)]);
+}
+
+function voiceStatusRefreshTimeout(): Promise<never> {
+  return new Promise((_, reject) => {
+    AbortSignal.timeout(VOICE_STATUS_REFRESH_TIMEOUT_MS).addEventListener("abort", () => {
+      reject(new DOMException("Voice status refresh timed out", "TimeoutError"));
+    });
+  });
+}
+
+function collapsedSidebarSectionsStorageKey(userId: string | null | undefined): string | null {
+  if (!userId) return null;
+  return `rakazo:collapsed-sidebar-sections:${userId}`;
+}
+
+function readCollapsedSidebarSections(userId: string | null | undefined): Set<string> {
+  const storageKey = collapsedSidebarSectionsStorageKey(userId);
+  if (!storageKey) return new Set();
+  try {
+    const value = window.localStorage.getItem(storageKey);
+    const keys: unknown = value ? JSON.parse(value) : [];
+    return new Set(
+      Array.isArray(keys) ? keys.filter((key): key is string => typeof key === "string") : [],
+    );
+  } catch {
+    return new Set();
+  }
+}
 
 export function ShellPage() {
+  const { t } = useLingui();
   const { botId, groupId } = useParams();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+  // Mirrors searchParams for effects that only need to read it once on run,
+  // not re-run on every unrelated query-param change (e.g. the SSE subscribe
+  // effect below, which should only restart when the active bot changes).
+  const searchParamsRef = useRef(searchParams);
+  searchParamsRef.current = searchParams;
   const session = authClient.useSession();
+  const userId = session.data?.user.id;
   const [groups, setGroups] = useState<Group[]>([]);
   const [bots, setBots] = useState<Bot[]>([]);
+  const botsRef = useRef(bots);
+  botsRef.current = bots;
+  const botOrderEpochRef = useRef(0);
+  const pendingBotOrderRef = useRef<string[] | null>(null);
+  const savingBotOrderRef = useRef(false);
   const [botSections, setBotSections] = useState<BotSection[]>([]);
+  const [spaces, setSpaces] = useState<Space[]>([]);
   const [archivedBots, setArchivedBots] = useState<Bot[]>([]);
+  const [archivedGroups, setArchivedGroups] = useState<Group[]>([]);
   const [archivedOpen, setArchivedOpen] = useState(false);
+  const [collapsedSidebarSections, setCollapsedSidebarSections] = useState(() => new Set<string>());
+
+  useEffect(() => {
+    setCollapsedSidebarSections(readCollapsedSidebarSections(userId));
+  }, [userId]);
+  useEffect(() => {
+    setBotsSidebarCollapsed(readBotsSidebarCollapsed(userId));
+  }, [userId]);
   const [query, setQuery] = useState("");
   const [searchHits, setSearchHits] = useState<SearchHit[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [snapshot, setSnapshot] = useState<ThreadSnapshot | null>(null);
+  const snapshotRef = useRef<ThreadSnapshot | null>(null);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [replyTarget, setReplyTarget] = useState<ThreadMessage | null>(null);
   const [sending, setSending] = useState(false);
@@ -184,46 +354,161 @@ export function ShellPage() {
   const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [panel, setPanel] = useState<Panel>(null);
+  const [peerConversation, setPeerConversation] = useState<{
+    peerBotId: string;
+    peerBotName: string;
+  } | null>(null);
   const [routines, setRoutines] = useState<Routine[]>([]);
   const [routinesBotId, setRoutinesBotId] = useState<string | null>(null);
   const [taughtSkills, setTaughtSkills] = useState<TaughtSkill[]>([]);
   const [taughtSkillsBotId, setTaughtSkillsBotId] = useState<string | null>(null);
+  const [agentSkills, setAgentSkills] = useState<AgentSkillCatalogEntry[]>([]);
+  const [mentionRoutines, setMentionRoutines] = useState<Array<Routine & { botName?: string }>>([]);
+  const [mentionConnectors, setMentionConnectors] = useState<
+    Array<{
+      id: string;
+      name: string;
+      authStatus: "connected" | "needs_auth";
+      connectionId?: string;
+    }>
+  >([]);
   const [teachBusy, setTeachBusy] = useState(false);
   const [computer, setComputer] = useState<ComputerStatus | null>(null);
+  const computerRef = useRef<ComputerStatus | null>(null);
+  const threadRefreshEpoch = useRef(0);
+  const groupRefreshEpoch = useRef(0);
+  const botsRefreshEpoch = useRef(0);
+  const botsRefreshApplied = useRef(0);
+  const archivedBotsRefreshEpoch = useRef(0);
+  const botsRefreshInFlight = useRef(0);
+  // A very fast run can finish over SSE while its threads.send response is still
+  // returning. Do not let that late receipt resurrect terminal work as queued.
+  const terminalRunReceipts = useRef(new Set<string>());
+  // Last-known computer/screen per bot, so switching back to an already-seen
+  // bot paints its computer pane instantly instead of blanking it while the
+  // thread + screen RPCs round-trip again (see refreshThread / refreshComputerScreen).
+  const computerCacheRef = useRef(
+    new Map<string, { computer: ComputerStatus | null; screenUrl: string | null }>(),
+  );
+  // Caps computerCacheRef so a long session that opens many distinct bots
+  // over time doesn't accumulate one entry per bot forever. Re-inserting on
+  // every update keeps Map iteration order as least-recently-used first, so
+  // eviction drops the bot that's been out of view longest.
+  const COMPUTER_CACHE_LIMIT = 20;
+
+  function cacheComputerFor(
+    botId: string,
+    patch: Partial<{ computer: ComputerStatus | null; screenUrl: string | null }>,
+  ) {
+    const cache = computerCacheRef.current;
+    const prev = cache.get(botId) ?? { computer: null, screenUrl: null };
+    cache.delete(botId);
+    cache.set(botId, { ...prev, ...patch });
+    if (cache.size > COMPUTER_CACHE_LIMIT) {
+      const oldest = cache.keys().next().value;
+      if (oldest !== undefined) cache.delete(oldest);
+    }
+  }
+
+  function commitSnapshot(next: ThreadSnapshot | null) {
+    snapshotRef.current = next;
+    setSnapshot(next);
+  }
+
+  function commitComputer(next: ComputerStatus | null) {
+    computerRef.current = next;
+    setComputer(next);
+  }
+
+  function updateSnapshot(update: (prev: ThreadSnapshot | null) => ThreadSnapshot | null) {
+    commitSnapshot(update(snapshotRef.current));
+  }
   const [pluginsOpen, setPluginsOpen] = useState(false);
   const [mcpOpen, setMcpOpen] = useState(false);
-  const [accountSettingsOpen, setAccountSettingsOpen] = useState(false);
-  const [modelsOpen, setModelsOpen] = useState(false);
-  const [memorySettingsOpen, setMemorySettingsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
+  const [messagingSettingsOpen, setMessagingSettingsOpen] = useState(false);
+  const [messagingSurfaceEnabled, setMessagingSurfaceEnabled] = useState(false);
+  const [messagingProviders, setMessagingProviders] = useState<string[]>([]);
   const [memoryProviderConfig, setMemoryProviderConfig] = useState<
-    WorkspaceMemoryConfig | null | undefined
+    SpaceMemoryConfig | null | undefined
   >(undefined);
   const memoryProviderConfigRevision = useRef(0);
-  const [voiceOpen, setVoiceOpen] = useState(false);
   const [callOpen, setCallOpen] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
-  const [dictating, setDictating] = useState(false);
-  const [dictationError, setDictationError] = useState<string | null>(null);
+  const [dismissedRunErrorIds, setDismissedRunErrorIds] =
+    useState<ReadonlySet<string>>(readSeenRunErrorIds);
   const [menuOpen, setMenuOpen] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const mobileSidebarSwipeRef = useRef<{ startX: number; startY: number } | null>(null);
+  const [draggedBotId, setDraggedBotId] = useState<string | null>(null);
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
+  const [botsSidebarCollapsed, setBotsSidebarCollapsed] = useState(false);
+  const focusPromptAbortRef = useRef<AbortController | null>(null);
+  const focusPromptBotIdRef = useRef<string | null>(null);
+  const botsSidebarEdgeDragRef = useRef<{ startX: number; mode: "expand" | "collapse" } | null>(
+    null,
+  );
+  const [newSpaceOpen, setNewSpaceOpen] = useState(false);
+  const [pickerInfoTopic, setPickerInfoTopic] = useState<"group" | "space" | null>(null);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+
+  useEffect(() => {
+    const desktop = window.matchMedia("(min-width: 768px)");
+    function closeMobileSidebar() {
+      if (desktop.matches) setMobileSidebarOpen(false);
+    }
+    closeMobileSidebar();
+    desktop.addEventListener("change", closeMobileSidebar);
+    return () => desktop.removeEventListener("change", closeMobileSidebar);
+  }, []);
+  const [activityMode, setActivityMode] = useState(readActivityMode);
+  const toggleActivityMode = useCallback(() => {
+    setActivityMode((on) => {
+      const next = !on;
+      writeActivityMode(next);
+      return next;
+    });
+  }, []);
   const [botMenu, setBotMenu] = useState<{
-    botId: string;
+    kind: "bot" | "group";
+    id: string;
     position: ContextMenuPosition;
   } | null>(null);
+  // The context menu anchors to the pointer, so return focus to the row that opened it.
+  const botMenuAnchor = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (botMenu || !botMenuAnchor.current) return;
+    botMenuAnchor.current.focus();
+    botMenuAnchor.current = null;
+  }, [botMenu]);
   const [deleteTarget, setDeleteTarget] = useState<Bot | null>(null);
-  const [clearTarget, setClearTarget] = useState<Bot | null>(null);
-  const [newSectionBot, setNewSectionBot] = useState<Bot | null>(null);
+  const [deleteGroupTarget, setDeleteGroupTarget] = useState<Group | null>(null);
+  const [deleteSpaceTarget, setDeleteSpaceTarget] = useState<Space | null>(null);
+  const [spaceMenu, setSpaceMenu] = useState<{
+    id: string;
+    position: ContextMenuPosition;
+  } | null>(null);
+  const spaceMenuAnchor = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (spaceMenu || !spaceMenuAnchor.current) return;
+    spaceMenuAnchor.current.focus();
+    spaceMenuAnchor.current = null;
+  }, [spaceMenu]);
+  const closeSpaceMenu = useCallback(() => setSpaceMenu(null), []);
+  const [clearTarget, setClearTarget] = useState<
+    { kind: "bot"; chat: Bot } | { kind: "group"; chat: Group } | null
+  >(null);
+  const [newSectionTarget, setNewSectionTarget] = useState<
+    { kind: "bot"; chat: Bot } | { kind: "group"; chat: Group } | null
+  >(null);
   const [booting, setBooting] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [initialBotsLoaded, setInitialBotsLoaded] = useState(false);
   const [bootstrapMe, setBootstrapMe] = useState<Me | null>();
-  const [routineDraft, setRoutineDraft] = useState({
-    name: "",
-    prompt: "",
-    schedule: defaultCronPreset(),
-  });
+  const [routineDraft, setRoutineDraft] = useState<RoutineDraftState>(emptyRoutineDraft());
+  const [routineWebhookSecret, setRoutineWebhookSecret] = useState<string | null>(null);
   const [editingRoutine, setEditingRoutine] = useState<Routine | null>(null);
   const [deleteRoutineTarget, setDeleteRoutineTarget] = useState<Routine | null>(null);
   const [savingRoutine, setSavingRoutine] = useState(false);
@@ -231,6 +516,48 @@ export function ShellPage() {
   const [routineError, setRoutineError] = useState<string | null>(null);
   const [screenUrl, setScreenUrl] = useState<string | null>(null);
   const [computerOpen, setComputerOpen] = useState(false);
+  const [computerViewport, setComputerViewport] = useState<{
+    height: number;
+    offsetTop: number;
+  } | null>(null);
+  const [computerError, setComputerError] = useState<string | null>(null);
+  // Screen-load failures can sit beside a still-valid embed URL; boot and
+  // takeover failures must stay visible even when a URL remains.
+  const [computerErrorFromScreen, setComputerErrorFromScreen] = useState(false);
+  useEffect(() => {
+    if (!computerOpen) {
+      setComputerViewport(null);
+      return;
+    }
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+    const sync = () => {
+      setComputerViewport({ height: viewport.height, offsetTop: viewport.offsetTop });
+    };
+    sync();
+    viewport.addEventListener("resize", sync);
+    viewport.addEventListener("scroll", sync);
+    return () => {
+      viewport.removeEventListener("resize", sync);
+      viewport.removeEventListener("scroll", sync);
+    };
+  }, [computerOpen]);
+  useEffect(() => {
+    if (!session.data?.user) return;
+    let cancelled = false;
+    void rpc.messaging
+      .status()
+      .then((status) => {
+        if (!cancelled) {
+          setMessagingSurfaceEnabled(status.enabled);
+          setMessagingProviders(status.providers);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [session.data?.user]);
   const [usage, setUsage] = useState<{
     inputTokens: number;
     outputTokens: number;
@@ -238,15 +565,27 @@ export function ShellPage() {
   } | null>(null);
   const autoBooted = useRef<string | null>(null);
   const routineSavePending = useRef(false);
+  const webhookSecretProvisionRef = useRef(new Map<string, Promise<string>>());
+  const ensureWebhookSecret = (botId: string) =>
+    sharedInflight(webhookSecretProvisionRef.current, botId, async () => {
+      const result = await rpc.bots.rotateWebhookSecret({ botId });
+      setRoutineWebhookSecret(result.secret);
+      setBots((current) =>
+        current.map((bot) => (bot.id === botId ? { ...bot, webhookConfigured: true } : bot)),
+      );
+      return result.secret;
+    });
   const routineSaveRequest = useRef(0);
   const routineRunPending = useRef(false);
   const bootstrappedThread = useRef<ThreadSnapshot | null>(null);
   const expandedHistoryThread = useRef<string | null>(null);
   const historyEpoch = useRef(0);
+  const jumpGeneration = useRef(0);
   const initiallyScrolledThread = useRef<string | null>(null);
   const messageScroll = useRef<HTMLDivElement>(null);
   const pinnedAroundRef = useRef<{
-    botId: string;
+    botId?: string;
+    groupId?: string;
     messageId: string;
     threadId: string;
     messages: ThreadMessage[];
@@ -254,6 +593,8 @@ export function ShellPage() {
   } | null>(null);
   const manuallyUnread = useRef(new Set<string>());
   const readVisibleGroups = useRef(new Set<string>());
+  const notifiedBrowserEvents = useRef(new Set<string>());
+  const pendingBrowserNotifications = useRef(new Map<string, PendingBrowserNotification>());
   const computerVisible = useRef(false);
   computerVisible.current = panel === "computer" || computerOpen;
   const autoSpoken = useRef<string | null>(null);
@@ -278,7 +619,11 @@ export function ShellPage() {
   const activeGroupId = useRef<string | undefined>(groupId);
   activeGroupId.current = groupId;
   const screenRequest = useRef(0);
-  const contextBot = botMenu ? bots.find((bot) => bot.id === botMenu.botId) : undefined;
+  const contextBot =
+    botMenu?.kind === "bot" ? bots.find((bot) => bot.id === botMenu.id) : undefined;
+  const contextGroup =
+    botMenu?.kind === "group" ? groups.find((group) => group.id === botMenu.id) : undefined;
+  const contextChat = contextBot ?? contextGroup;
   const closeBotMenu = useCallback(() => setBotMenu(null), []);
   const updateBotUnread = useCallback((id: string, unread: boolean) => {
     setBots((current) => {
@@ -321,127 +666,254 @@ export function ShellPage() {
     },
     [markBotRead],
   );
+  const deliverBrowserNotification = useCallback((pending: PendingBrowserNotification): boolean => {
+    const currentBot = botsRef.current.find((bot) => bot.id === pending.botId);
+    if (!currentBot || typeof Notification === "undefined") return true;
+    const result = deliverNativeBrowserNotification(
+      pending.event,
+      currentBot.name || pending.botName,
+      {
+        enabled: pending.groupNotification || currentBot.notifyOnFinish,
+        pageVisible: document.visibilityState === "visible",
+        windowFocused: document.hasFocus(),
+        permission: Notification.permission,
+        notifiedEventIds: notifiedBrowserEvents.current,
+        show: (title, body, tag) => new Notification(title, { body, tag }),
+      },
+    );
+    return result !== "pending";
+  }, []);
+  const flushPendingBrowserNotifications = useCallback(() => {
+    for (const [threadId, pending] of pendingBrowserNotifications.current) {
+      if (deliverBrowserNotification(pending)) {
+        pendingBrowserNotifications.current.delete(threadId);
+      }
+    }
+  }, [deliverBrowserNotification]);
+  const notifyBrowserForEvent = useCallback(
+    (
+      event: Pick<ProductEvent, "id" | "type" | "threadId" | "seq" | "botId" | "payload">,
+      subscribedThreadId: string | undefined,
+      initialCursor: number,
+      streamReady: boolean,
+      botName: string,
+      enabled: boolean,
+      groupNotification: boolean,
+    ) => {
+      const botId = event.botId;
+      if (typeof botId !== "string") return;
+      const eligible = shouldNotifyBrowser(event, {
+        subscribedThreadId: subscribedThreadId ?? "",
+        initialCursor,
+        streamReady,
+        pageVisible: document.visibilityState === "visible",
+        windowFocused: document.hasFocus(),
+        permission: "granted",
+        notifiedEventIds: notifiedBrowserEvents.current,
+      });
+      if (!eligible || !enabled) return;
+      const pending = {
+        event,
+        botId,
+        botName,
+        groupNotification,
+      } satisfies PendingBrowserNotification;
+      if (typeof Notification === "undefined" || Notification.permission === "denied") return;
+      if (Notification.permission === "default") {
+        pendingBrowserNotifications.current.set(event.threadId, pending);
+        return;
+      }
+      if (deliverBrowserNotification(pending)) {
+        pendingBrowserNotifications.current.delete(event.threadId);
+      } else {
+        pendingBrowserNotifications.current.set(event.threadId, pending);
+      }
+    },
+    [deliverBrowserNotification],
+  );
 
   const refreshBots = useCallback(
-    async (includeArchived = false) => {
+    async (includeArchived = false, replaceBotOrder = false) => {
       markOnce("rk:renderer:bots-request-start");
-      const [list, sections, archived, groupList] = await Promise.all([
-        rpc.bots.list(),
-        rpc.botSections.list(),
-        includeArchived ? rpc.bots.listArchived() : Promise.resolve(null),
-        rpc.groups.list(),
-      ]);
-      markOnce("rk:renderer:bots-response");
-      setBots(list);
-      setBotSections(sections);
-      setGroups(groupList);
-      setInitialBotsLoaded(true);
-      if (archived) setArchivedBots(archived);
-      if (
-        includeArchived &&
-        list.length === 0 &&
-        archived?.length === 0 &&
-        groupList.length === 0
-      ) {
-        navigate("/onboarding", { replace: true });
-        return;
-      }
-      const currentGroupId = routeGroupId.current;
-      if (currentGroupId) {
-        if (!groupList.some((group) => group.id === currentGroupId)) {
+      const request = ++botsRefreshEpoch.current;
+      const botOrderEpoch = botOrderEpochRef.current;
+      const preserveBotOrder = savingBotOrderRef.current || pendingBotOrderRef.current !== null;
+      const archivedRequest = includeArchived ? ++archivedBotsRefreshEpoch.current : null;
+      botsRefreshInFlight.current += 1;
+      try {
+        const [navigation, archived, archivedGroupList] = await Promise.all([
+          rpc.spaces.list(),
+          includeArchived ? rpc.bots.listArchived() : Promise.resolve(null),
+          includeArchived ? rpc.groups.listArchived() : Promise.resolve(null),
+        ]);
+        const { bots: list, botSections: sections, groups: groupList } = navigation.current;
+        markOnce("rk:renderer:bots-response");
+        const botsFresh = request === botsRefreshEpoch.current;
+        const archivedFresh =
+          archivedRequest != null && archivedRequest === archivedBotsRefreshEpoch.current;
+        // A newer non-archived refresh can win the bots epoch while an older
+        // includeArchived request still owns archivedBotsRefreshEpoch — apply
+        // whichever slices are still current.
+        if (!botsFresh && !archivedFresh) return;
+        if (archivedFresh && archived) setArchivedBots(archived);
+        if (archivedFresh && archivedGroupList) setArchivedGroups(archivedGroupList);
+        if (!botsFresh) return;
+        if (
+          botOrderEpoch === botOrderEpochRef.current &&
+          (replaceBotOrder || (!preserveBotOrder && !savingBotOrderRef.current))
+        ) {
+          setBots(list);
+        }
+        setBotSections(sections);
+        setGroups(groupList);
+        setSpaces(navigation.spaces);
+        setInitialBotsLoaded(true);
+        botsRefreshApplied.current = request;
+        if (
+          includeArchived &&
+          list.length === 0 &&
+          archived?.length === 0 &&
+          groupList.length === 0 &&
+          archivedGroupList?.length === 0 &&
+          !navigation.spaces.some((space) => space.hasContent)
+        ) {
+          // Only the very first bot everywhere needs onboarding. An empty
+          // current space with content elsewhere stays in the app so the
+          // space can be switched to or deleted instead of trapping the user.
+          navigate("/onboarding", { replace: true });
+          return;
+        }
+        const currentGroupId = routeGroupId.current;
+        if (currentGroupId) {
+          if (!groupList.some((group) => group.id === currentGroupId)) {
+            navigate(firstThreadRoute(list, groupList), { replace: true });
+          }
+          return;
+        }
+        const currentBotId = routeBotId.current;
+        if (!currentBotId || !list.some((bot) => bot.id === currentBotId)) {
           navigate(firstThreadRoute(list, groupList), { replace: true });
         }
-        return;
-      }
-      const currentBotId = routeBotId.current;
-      if (!currentBotId || !list.some((bot) => bot.id === currentBotId)) {
-        navigate(firstThreadRoute(list, groupList), { replace: true });
+      } finally {
+        botsRefreshInFlight.current -= 1;
       }
     },
     [navigate],
   );
 
-  async function refreshGroupThread(id: string) {
+  function snapTranscriptToEndAfterFrame() {
+    const queuedElement = messageScroll.current;
+    if (!queuedElement) return;
+    const queuedScrollTop = queuedElement.scrollTop;
+    window.requestAnimationFrame(() => {
+      const element = messageScroll.current;
+      if (transcriptCanSnapAfterFrame(element, queuedElement, queuedScrollTop)) {
+        queuedElement.scrollTop = queuedElement.scrollHeight;
+      }
+    });
+  }
+
+  async function refreshGroupThread(id: string, signal?: AbortSignal) {
     const scrollElement = messageScroll.current;
-    const stickToEnd =
-      !scrollElement ||
-      scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight < 80;
+    const stickToEnd = !scrollElement || transcriptIsNearEnd(scrollElement);
     markOnce("rk:renderer:thread-request-start");
-    const snap = await rpc.threads.get({ groupId: id });
+    const request = ++groupRefreshEpoch.current;
+    const snap = await rpc.threads.get({ groupId: id }, signal ? { signal } : undefined);
     markOnce("rk:renderer:thread-response");
-    if (activeGroupId.current !== id) return snap;
-    setSnapshot((prev) =>
-      mergeThreadSnapshot(prev, snap, expandedHistoryThread.current === snap.threadId),
+    if (activeGroupId.current !== id || request !== groupRefreshEpoch.current) return snap;
+    const reconciled = reconcileRefreshedThread(
+      snapshotRef.current,
+      snap,
+      computerRef.current,
+      expandedHistoryThread.current === snap.threadId,
     );
-    setComputer(null);
+    commitSnapshot(reconciled.snapshot);
+    commitComputer(null);
     setRoutines([]);
     setRoutinesBotId(null);
-    if (stickToEnd) {
-      window.requestAnimationFrame(() => {
-        const element = messageScroll.current;
-        if (element) element.scrollTop = element.scrollHeight;
-      });
+    // Keep the search-jump viewport; expandedHistoryThread merge still accepts live messages.
+    if (
+      stickToEnd &&
+      (!scrollElement || transcriptIsNearEnd(scrollElement)) &&
+      expandedHistoryThread.current !== snap.threadId
+    ) {
+      snapTranscriptToEndAfterFrame();
     }
     return snap;
   }
 
-  async function refreshThread(id: string) {
+  async function refreshThread(id: string, signal?: AbortSignal) {
     const scrollElement = messageScroll.current;
-    const stickToEnd =
-      !scrollElement ||
-      scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight < 80;
+    const stickToEnd = !scrollElement || transcriptIsNearEnd(scrollElement);
     markOnce("rk:renderer:thread-request-start");
-    const pin = pinnedAroundRef.current;
-    const keepPin = pin?.botId === id;
     const epoch = historyEpoch.current;
-    const [snap, routines, skills] = await Promise.all([
-      rpc.threads.get({ botId: id }),
-      rpc.routines.list({ botId: id }),
-      rpc.skills.list({ botId: id }),
-      refreshComputerScreen(id),
-    ]);
+    const request = ++threadRefreshEpoch.current;
+    // Apply threads.get as soon as it returns so stop/takeover status is not held behind
+    // routines/skills/screen fetches (progress can advance the cursor meanwhile).
+    const snap = await rpc.threads.get({ botId: id }, signal ? { signal } : undefined);
     markOnce("rk:renderer:thread-response");
-    // The epoch check drops a response that raced a conversation clear, which would otherwise
-    // re-apply the deleted messages and cursor over the emptied snapshot.
-    if (activeBotId.current !== id || epoch !== historyEpoch.current) return snap;
-    setSnapshot((prev) => {
-      let merged = mergeThreadSnapshot(prev, snap, expandedHistoryThread.current === snap.threadId);
-      if (keepPin && merged) {
-        merged = {
-          ...merged,
-          messages: pin.messages,
-          olderCursor: pin.olderCursor,
-        };
-      }
-      return merged;
-    });
-    setComputer(snap.computer ?? null);
-    setRoutines(routines);
-    setRoutinesBotId(id);
-    setTaughtSkills(skills);
-    setTaughtSkillsBotId(id);
-    if (!keepPin && stickToEnd) {
-      window.requestAnimationFrame(() => {
-        const element = messageScroll.current;
-        if (element) element.scrollTop = element.scrollHeight;
-      });
+    if (
+      activeBotId.current !== id ||
+      epoch !== historyEpoch.current ||
+      request !== threadRefreshEpoch.current
+    ) {
+      return snap;
     }
+    const reconciled = reconcileRefreshedThread(
+      snapshotRef.current,
+      snap,
+      computerRef.current,
+      expandedHistoryThread.current === snap.threadId,
+    );
+    commitSnapshot(reconciled.snapshot);
+    commitComputer(reconciled.computer);
+    cacheComputerFor(id, { computer: reconciled.computer });
+    if (
+      stickToEnd &&
+      (!scrollElement || transcriptIsNearEnd(scrollElement)) &&
+      expandedHistoryThread.current !== snap.threadId
+    ) {
+      snapTranscriptToEndAfterFrame();
+    }
+    void Promise.all([
+      rpc.routines.list({ botId: id }).catch(() => null),
+      rpc.skills.list({ botId: id }).catch(() => null),
+      refreshComputerScreen(id).catch(() => null),
+    ]).then(([routines, skills]) => {
+      if (
+        activeBotId.current !== id ||
+        epoch !== historyEpoch.current ||
+        request !== threadRefreshEpoch.current
+      ) {
+        return;
+      }
+      if (routines) {
+        setRoutines(routines);
+        setRoutinesBotId(id);
+      }
+      if (skills) {
+        setTaughtSkills(skills);
+        setTaughtSkillsBotId(id);
+      }
+    });
     return snap;
   }
 
   async function refreshComputerScreen(id: string) {
     if (!computerVisible.current) return null;
     const request = ++screenRequest.current;
-    const screen = await rpc.computer.screenUrl({ botId: id }).catch(() => ({ url: null }));
-    if (
-      request !== screenRequest.current ||
-      activeBotId.current !== id ||
-      !computerVisible.current
-    ) {
-      return null;
-    }
-    setScreenUrl(screen.url);
-    return screen.url;
+    return loadComputerScreen({
+      load: () => rpc.computer.screenUrl({ botId: id }),
+      isCurrent: () =>
+        request === screenRequest.current && activeBotId.current === id && computerVisible.current,
+      commit: (screen) => {
+        setScreenUrl(screen.url);
+        setComputerError(screen.error);
+        setComputerErrorFromScreen(Boolean(screen.error));
+        cacheComputerFor(id, { screenUrl: screen.url });
+      },
+      fallbackError: t`Could not connect to the computer screen`,
+    });
   }
 
   async function loadOlderMessages() {
@@ -475,7 +947,7 @@ export function ShellPage() {
       )
         return;
       expandedHistoryThread.current = page.threadId;
-      setSnapshot((prev) => prependThreadMessagePage(prev, page));
+      updateSnapshot((prev) => prependThreadMessagePage(prev, page));
       window.requestAnimationFrame(() => {
         const element = messageScroll.current;
         if (element) element.scrollTop += element.scrollHeight - previousHeight;
@@ -500,25 +972,41 @@ export function ShellPage() {
           setMemoryProviderConfig(null);
         }
       });
-    void Promise.all([takeInitialBootstrap(botId), rpc.groups.list()])
-      .then(([bootstrap, groupList]) => {
+    const appliedAtStart = botsRefreshApplied.current;
+    void takeInitialBootstrap(botId)
+      .then((bootstrap) => {
         if (cancelled) return;
+        const groupList = bootstrap.groups;
         setBootstrapMe(bootstrap.me);
-        setBots(bootstrap.bots);
-        setBotSections(bootstrap.botSections);
-        setArchivedBots(bootstrap.archivedBots);
-        setGroups(groupList);
-        setInitialBotsLoaded(true);
+        // Skip list/route writes only if a later refreshBots() successfully
+        // committed (failed refreshes bump epoch but not botsRefreshApplied).
+        const applyBotLists = appliedAtStart === botsRefreshApplied.current;
+        if (applyBotLists) {
+          setBots(bootstrap.bots);
+          setBotSections(bootstrap.botSections);
+          setArchivedBots(bootstrap.archivedBots);
+          setArchivedGroups(bootstrap.archivedGroups);
+          setGroups(groupList);
+          setSpaces(bootstrap.spaces);
+          setInitialBotsLoaded(true);
+        }
         if (!groupId && bootstrap.thread) {
           bootstrappedThread.current = bootstrap.thread;
-          setSnapshot(bootstrap.thread);
-          setComputer(bootstrap.thread.computer ?? null);
+          commitSnapshot(bootstrap.thread);
+          commitComputer(bootstrap.thread.computer ?? null);
           setRoutines(bootstrap.routines);
           setRoutinesBotId(bootstrap.thread.botId ?? null);
           markOnce("rk:renderer:bots-response");
           markOnce("rk:renderer:thread-response");
         }
-        if (bootstrap.bots.length === 0 && bootstrap.archivedBots.length === 0) {
+        if (!applyBotLists) return;
+        if (
+          bootstrap.bots.length === 0 &&
+          bootstrap.archivedBots.length === 0 &&
+          groupList.length === 0 &&
+          bootstrap.archivedGroups.length === 0 &&
+          !bootstrap.spaces.some((space) => space.hasContent)
+        ) {
           navigate("/onboarding", { replace: true });
           return;
         }
@@ -546,7 +1034,12 @@ export function ShellPage() {
     };
     window.addEventListener("focus", refreshVisibleBots);
     document.addEventListener("visibilitychange", refreshVisibleBots);
-    const poll = window.setInterval(refreshVisibleBots, 60_000);
+    // Poll skips while a refresh is in flight; focus/visibility and event-driven
+    // callers still bump botsRefreshEpoch so only the latest response applies.
+    const poll = window.setInterval(() => {
+      if (botsRefreshInFlight.current > 0) return;
+      refreshVisibleBots();
+    }, 3_000);
     return () => {
       cancelled = true;
       window.clearTimeout(refreshTimer);
@@ -557,6 +1050,28 @@ export function ShellPage() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    void rpc.agentSkills
+      .list()
+      .then((skills) => {
+        if (!cancelled) setAgentSkills(skills);
+      })
+      .catch(() => {
+        if (!cancelled) setAgentSkills([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const refreshAgentSkills = useCallback(() => {
+    void rpc.agentSkills
+      .list()
+      .then(setAgentSkills)
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
     void rpc.voice
       .status()
       .then(setVoiceStatus)
@@ -564,14 +1079,8 @@ export function ShellPage() {
     const unsubSpeech = speaker.subscribe((state) => {
       setSpeakingMessageId(state.status === "idle" ? null : (state.messageId ?? null));
     });
-    const unsubDictation = dictation.subscribe((state) => {
-      setDictating(state.status === "listening" || state.status === "transcribing");
-      if (state.error) setDictationError(state.error);
-      else if (state.status === "listening") setDictationError(null);
-    });
     return () => {
       unsubSpeech();
-      unsubDictation();
     };
   }, []);
 
@@ -620,74 +1129,104 @@ export function ShellPage() {
 
   useEffect(() => {
     if (!active) return;
-    if (!searchParams.get("m")) {
+    const pendingJump = searchParamsRef.current.get("m");
+    if (!pendingJump) {
       pinnedAroundRef.current = null;
     }
     screenRequest.current += 1;
-    setScreenUrl(null);
+    setComputerError(null);
+    setComputerErrorFromScreen(false);
+    const cached = computerCacheRef.current.get(active.id);
+    if (cached) {
+      // Paint the last-known computer instantly; refreshThread/refreshComputerScreen
+      // below still run and reconcile with fresh data in the background.
+      setScreenUrl(cached.screenUrl);
+      commitComputer(cached.computer);
+    } else {
+      setScreenUrl(null);
+    }
     expandedHistoryThread.current = null;
     historyEpoch.current += 1;
     const abort = new AbortController();
-    void (async () => {
-      const primed = bootstrappedThread.current;
-      bootstrappedThread.current = null;
-      const snap =
-        primed?.botId === active.id ? primed : await refreshThread(active.id).catch(() => null);
-      if (abort.signal.aborted) return;
-      let cursor = snap?.cursor ?? -1;
-      let retryMs = 250;
-      while (!abort.signal.aborted) {
-        try {
-          const events = await rpc.threads.subscribe(
-            { botId: active.id, cursor },
-            { signal: abort.signal },
-          );
-          for await (const event of events) {
-            if (abort.signal.aborted) break;
-            cursor = Math.max(cursor, event.seq);
-            retryMs = 250;
-            applyThreadEvent(event, setSnapshot, setComputer);
-            if (event.type === "thread.cleared") {
-              expandedHistoryThread.current = null;
-              pinnedAroundRef.current = null;
-              historyEpoch.current += 1;
-            }
-            if (event.type === "bot.archived") {
-              void refreshBots(true).catch(() => undefined);
-            } else if (
-              event.type === "bot.spawned" ||
-              event.type === "bot.deleted" ||
-              isRunTerminalEvent(event) ||
-              event.type === "thread.cleared"
-            ) {
-              void refreshBots().catch(() => undefined);
-            }
-            if (event.type === "thread.message.created") {
-              const blocks = (event.payload.blocks as Array<{ kind?: string }>) ?? [];
-              if (blocks.some((block) => block.kind === "child_bot")) {
-                void refreshBots().catch(() => undefined);
-              }
-              if (event.payload.role === "bot") markBotReadIfVisible(active.id);
-            }
-            if (isRunTerminalEvent(event) || event.type === "skill.teaching.stopped") {
-              void refreshThread(active.id).catch(() => undefined);
-            } else if (isComputerStatusEvent(event)) {
-              void refreshComputerScreen(active.id).catch(() => undefined);
-            }
+    void runThreadSubscription({
+      signal: abort.signal,
+      loadInitial: async () => {
+        const primed = bootstrappedThread.current;
+        bootstrappedThread.current = null;
+        // Pending search jumps load the around-page separately; avoid replacing it with latest.
+        return primed?.botId === active.id
+          ? primed
+          : pendingJump
+            ? rpc.threads.get({ botId: active.id }, { signal: threadSnapshotSignal(abort.signal) })
+            : refreshThread(active.id, threadSnapshotSignal(abort.signal));
+      },
+      loadHead: () =>
+        rpc.threads.head({ botId: active.id }, { signal: threadSnapshotSignal(abort.signal) }),
+      refresh: () => refreshThread(active.id, threadSnapshotSignal(abort.signal)),
+      currentSnapshot: () => snapshotRef.current,
+      subscribe: (cursor) =>
+        rpc.threads.subscribe({ botId: active.id, cursor }, { signal: abort.signal }),
+      beforeEvent: (event) => {
+        if (isRunTerminalEvent(event) && event.runId) {
+          terminalRunReceipts.current.add(event.runId);
+          if (terminalRunReceipts.current.size > 100) {
+            const oldest = terminalRunReceipts.current.values().next().value;
+            if (oldest !== undefined) terminalRunReceipts.current.delete(oldest);
           }
-        } catch {
-          // The durable cursor below makes reconnects safe after a transient network failure.
         }
-        if (abort.signal.aborted) break;
-        await refreshThread(active.id).catch(() => null);
-        await abortableDelay(retryMs, abort.signal);
-        retryMs = Math.min(retryMs * 2, 5_000);
-      }
-    })();
+      },
+      applyEvent: (event) =>
+        applyThreadEvent(event, commitSnapshot, commitComputer, snapshotRef, computerRef),
+      onEvent: (event, initial) => {
+        const currentBot = botsRef.current.find((bot) => bot.id === active.id);
+        notifyBrowserForEvent(
+          event,
+          initial.threadId,
+          initial.cursor,
+          true,
+          currentBot?.name ?? active.name,
+          currentBot?.notifyOnFinish ?? false,
+          false,
+        );
+        if (event.type === "thread.cleared") {
+          expandedHistoryThread.current = null;
+          pinnedAroundRef.current = null;
+          historyEpoch.current += 1;
+        }
+        if (event.type === "bot.archived") {
+          void refreshBots(true).catch(() => undefined);
+        } else if (
+          event.type === "bot.spawned" ||
+          event.type === "bot.deleted" ||
+          event.type === "run.started" ||
+          isRunTerminalEvent(event) ||
+          event.type === "thread.cleared"
+        ) {
+          void refreshBots().catch(() => undefined);
+        }
+        if (event.type === "thread.message.created") {
+          const blocks = (event.payload.blocks as Array<{ kind?: string }>) ?? [];
+          if (blocks.some((block) => block.kind === "child_bot")) {
+            void refreshBots().catch(() => undefined);
+          }
+          if (event.payload.role === "bot") markBotReadIfVisible(active.id);
+        }
+        if (
+          isRunTerminalEvent(event) ||
+          event.type === "run.waiting_input" ||
+          event.type === "skill.teaching.stopped"
+        ) {
+          // waiting_input: reconcile ask cards if a stale post-send refresh raced SSE.
+          void refreshThread(active.id).catch(() => undefined);
+        } else if (isComputerStatusEvent(event)) {
+          void refreshComputerScreen(active.id).catch(() => undefined);
+        }
+      },
+    });
     return () => {
       abort.abort();
     };
-  }, [active?.id, markBotReadIfVisible, searchParams]);
+  }, [active?.id, markBotReadIfVisible, notifyBrowserForEvent]);
 
   useEffect(() => {
     if (!groupId || !activeGroup) return;
@@ -719,58 +1258,207 @@ export function ShellPage() {
     markVisibleGroupRead();
     window.addEventListener("focus", markVisibleGroupRead);
     document.addEventListener("visibilitychange", markVisibleGroupRead);
-    pinnedAroundRef.current = null;
+    const pendingJump = searchParamsRef.current.get("m");
+    if (!pendingJump) {
+      pinnedAroundRef.current = null;
+      expandedHistoryThread.current = null;
+    }
+    historyEpoch.current += 1;
     const abort = new AbortController();
-    void (async () => {
-      const snap = await refreshGroupThread(groupId).catch(() => null);
-      if (abort.signal.aborted) return;
-      let cursor = snap?.cursor ?? -1;
-      let retryMs = 250;
-      while (!abort.signal.aborted) {
-        try {
-          const events = await rpc.threads.subscribe({ groupId, cursor }, { signal: abort.signal });
-          for await (const event of events) {
-            if (abort.signal.aborted) break;
-            cursor = Math.max(cursor, event.seq);
-            retryMs = 250;
-            applyThreadEvent(event, setSnapshot, setComputer);
-            if (event.type === "thread.message.created" && event.payload.role === "bot") {
-              readVisibleGroups.current.delete(groupId);
-              markVisibleGroupRead();
-            }
-            if (isRunTerminalEvent(event)) {
-              void refreshGroupThread(groupId).catch(() => undefined);
-            }
-          }
-        } catch {
-          // reconnect safely
+    void runThreadSubscription({
+      signal: abort.signal,
+      loadInitial: () =>
+        pendingJump
+          ? rpc.threads.get({ groupId }, { signal: threadSnapshotSignal(abort.signal) })
+          : refreshGroupThread(groupId, threadSnapshotSignal(abort.signal)),
+      loadHead: () => rpc.threads.head({ groupId }, { signal: threadSnapshotSignal(abort.signal) }),
+      refresh: () => refreshGroupThread(groupId, threadSnapshotSignal(abort.signal)),
+      currentSnapshot: () => snapshotRef.current,
+      subscribe: (cursor) => rpc.threads.subscribe({ groupId, cursor }, { signal: abort.signal }),
+      applyEvent: (event) =>
+        applyThreadEvent(event, commitSnapshot, commitComputer, snapshotRef, computerRef),
+      onEvent: (event, initial) => {
+        const eventBot = botsRef.current.find((bot) => bot.id === event.botId);
+        notifyBrowserForEvent(
+          event,
+          initial.threadId,
+          initial.cursor,
+          true,
+          eventBot?.name ?? activeGroup.name,
+          true,
+          true,
+        );
+        if (event.type === "thread.message.created" && event.payload.role === "bot") {
+          readVisibleGroups.current.delete(groupId);
+          markVisibleGroupRead();
         }
-        if (abort.signal.aborted) break;
-        await refreshGroupThread(groupId).catch(() => null);
-        await abortableDelay(retryMs, abort.signal);
-        retryMs = Math.min(retryMs * 2, 5_000);
-      }
-    })();
+        if (event.type === "run.started" || isRunTerminalEvent(event)) {
+          void refreshBots().catch(() => undefined);
+        }
+        if (isRunTerminalEvent(event) || event.type === "run.waiting_input") {
+          // waiting_input: reconcile ask cards if a stale post-send refresh raced SSE.
+          void refreshGroupThread(groupId).catch(() => undefined);
+        }
+      },
+    });
     return () => {
       window.removeEventListener("focus", markVisibleGroupRead);
       document.removeEventListener("visibilitychange", markVisibleGroupRead);
       abort.abort();
     };
-  }, [activeGroup?.id, groupId]);
+  }, [activeGroup?.id, groupId, notifyBrowserForEvent]);
 
-  const filtered = useMemo(
-    () => bots.filter((b) => `${b.name} ${b.preview}`.toLowerCase().includes(query.toLowerCase())),
-    [bots, query],
+  const sidebarGroups = useMemo(() => {
+    const needle = query.toLowerCase();
+    const sidebarSpaces =
+      spaces.length > 0
+        ? spaces.map((space) =>
+            space.id === bootstrapMe?.spaceId ? { ...space, bots, groups, botSections } : space,
+          )
+        : bootstrapMe
+          ? [
+              {
+                id: bootstrapMe.spaceId,
+                name: "Personal",
+                isDefault: true,
+                hasContent: true,
+                canDelete: false,
+                bots,
+                groups,
+                botSections,
+              },
+            ]
+          : [];
+    const showSpaceNames = sidebarSpaces.length > 1;
+    return sidebarSpaces.flatMap((space) => {
+      const visibleBots = space.bots.filter((bot) =>
+        `${bot.name} ${bot.title ?? ""} ${bot.preview ?? ""}`.toLowerCase().includes(needle),
+      );
+      const visibleGroups = space.groups.filter((group) =>
+        `${group.name} ${group.preview}`.toLowerCase().includes(needle),
+      );
+      const sections = groupBotsForSidebar(
+        [
+          ...visibleBots.map((chat) => ({ kind: "bot" as const, chat })),
+          ...visibleGroups.map((chat) => ({ kind: "group" as const, chat })),
+        ].map((item) => ({ ...item, pinned: item.chat.pinned, sectionId: item.chat.sectionId })),
+        space.botSections,
+      ).map((group, index) => ({
+        ...group,
+        key: showSpaceNames ? `space:${space.id}:${group.key}` : group.key,
+        title: showSpaceNames
+          ? group.title
+            ? `${space.name} · ${group.title}`
+            : space.name
+          : group.title,
+        showLock: showSpaceNames,
+        emptySpaceId: undefined as string | undefined,
+        spaceId: space.id,
+        spaceName: space.name,
+        canDeleteSpace: index === 0 && space.canDelete === true,
+      }));
+      if (sections.length > 0) return sections;
+      // Keep empty spaces selectable; chat clicks are the only switch control.
+      if (!showSpaceNames) return [];
+      if (needle && (space.bots.length > 0 || space.groups.length > 0)) return [];
+      return [
+        {
+          key: `space:${space.id}:empty`,
+          title: space.name,
+          bots: [],
+          showLock: true,
+          emptySpaceId: space.id,
+          spaceId: space.id,
+          spaceName: space.name,
+          canDeleteSpace: space.canDelete === true,
+        },
+      ];
+    });
+  }, [bootstrapMe, botSections, bots, groups, spaces, query]);
+
+  const openSpaceChat = useCallback(
+    (spaceId: string, path: string) => {
+      setMobileSidebarOpen(false);
+      const previousSpaceId = selectedSpaceId();
+      // Persist the active space (including primary) so voice/RPC headers match the chat.
+      const selectionStored = selectSpace(spaceId);
+      if (!selectionStored) return;
+      const previousEffective = previousSpaceId ?? bootstrapMe?.spaceId;
+      const boundaryChanged = previousEffective !== spaceId;
+      // Soft-navigate within the same space; reload only when the auth boundary changes
+      // so bootstrapped bots/groups match the request header.
+      if (boundaryChanged) {
+        window.location.assign(path);
+        return;
+      }
+      navigate(path);
+    },
+    [bootstrapMe?.spaceId, navigate],
   );
-  const sidebarGroups = useMemo(
-    () => groupBotsForSidebar<Bot>(filtered, botSections),
-    [botSections, filtered],
+  const flushBotOrder = useCallback(async () => {
+    if (savingBotOrderRef.current) return;
+    savingBotOrderRef.current = true;
+    try {
+      while (pendingBotOrderRef.current) {
+        const botIds = pendingBotOrderRef.current;
+        pendingBotOrderRef.current = null;
+        try {
+          await rpc.bots.reorder({ botIds });
+        } catch {
+          // Keep a newer order queued during this failed save; only roll back
+          // when nothing else is pending.
+          if (pendingBotOrderRef.current === null) {
+            await refreshBots(false, true).catch(() => undefined);
+          }
+        }
+      }
+    } finally {
+      savingBotOrderRef.current = false;
+      // A reorder may have arrived while saving=true and returned early.
+      if (pendingBotOrderRef.current) {
+        void flushBotOrder();
+      }
+    }
+  }, [refreshBots]);
+  const reorderRosterBot = useCallback(
+    (sourceId: string, targetId: string, groupBotIds: string[]) => {
+      if (!groupBotIds.includes(sourceId) || !groupBotIds.includes(targetId)) return;
+      const current = botsRef.current;
+      const reordered = reorderBotTo(current, sourceId, targetId);
+      if (reordered === current) return;
+      const next = [...reordered];
+      botOrderEpochRef.current += 1;
+      botsRef.current = next;
+      setBots(next);
+      pendingBotOrderRef.current = next.map((bot) => bot.id);
+      void flushBotOrder();
+    },
+    [flushBotOrder],
   );
-  const workspaceQuery = query.trim();
-  const showWorkspaceSearch = workspaceQuery.length > 0;
+  const toggleSidebarSection = useCallback(
+    (key: string) => {
+      setCollapsedSidebarSections((previous) => {
+        const next = new Set(previous);
+        if (next.has(key)) next.delete(key);
+        else next.add(key);
+        const storageKey = collapsedSidebarSectionsStorageKey(userId);
+        if (storageKey) {
+          try {
+            window.localStorage.setItem(storageKey, JSON.stringify([...next]));
+          } catch {
+            // Keep the UI usable when storage is unavailable.
+          }
+        }
+        return next;
+      });
+    },
+    [userId],
+  );
+  const spaceQuery = query.trim();
+  const showSpaceSearch = spaceQuery.length > 0;
 
   useEffect(() => {
-    if (!showWorkspaceSearch) {
+    if (!showSpaceSearch) {
       setSearchHits([]);
       setSearchLoading(false);
       return;
@@ -779,7 +1467,7 @@ export function ShellPage() {
     const timer = window.setTimeout(() => {
       setSearchLoading(true);
       void rpc.search
-        .query({ q: workspaceQuery })
+        .query({ q: spaceQuery })
         .then((result) => {
           if (!abort.signal.aborted) setSearchHits(result.hits);
         })
@@ -794,7 +1482,7 @@ export function ShellPage() {
       abort.abort();
       window.clearTimeout(timer);
     };
-  }, [showWorkspaceSearch, workspaceQuery]);
+  }, [showSpaceSearch, spaceQuery]);
 
   async function jumpToSearchHit(hit: SearchHit) {
     setQuery("");
@@ -803,55 +1491,97 @@ export function ShellPage() {
     if (hit.messageId) params.set("m", hit.messageId);
     if (hit.routineId) params.set("routine", hit.routineId);
     navigate({
-      pathname: `/app/${hit.botId}`,
+      pathname: hit.groupId ? `/app/g/${hit.groupId}` : `/app/${hit.botId}`,
       search: params.toString() ? `?${params.toString()}` : undefined,
     });
   }
 
-  async function jumpToMessage(botId: string, messageId: string) {
+  async function jumpToMessage(target: { botId?: string; groupId?: string; messageId: string }) {
+    const threadTarget = searchHitThreadTarget(target);
     const epoch = historyEpoch.current;
+    jumpGeneration.current += 1;
+    const jumpId = jumpGeneration.current;
     const [snap, page] = await Promise.all([
-      rpc.threads.get({ botId }),
-      rpc.threads.messages({ botId, around: { messageId } }),
+      rpc.threads.get(threadTarget),
+      rpc.threads.messages({ ...threadTarget, around: { messageId: target.messageId } }),
     ]);
     // The epoch check drops a jump that raced a conversation clear (or a bot switch): applying
     // the fetched page would pin deleted messages that every later refresh keeps restoring.
-    if (epoch !== historyEpoch.current) return;
-    expandedHistoryThread.current = page.threadId;
-    pinnedAroundRef.current = {
-      botId,
-      messageId,
-      threadId: page.threadId,
-      messages: page.messages,
-      olderCursor: page.olderCursor,
-    };
-    setSnapshot({
+    // jumpId drops an older jump that finished after a newer click.
+    if (epoch !== historyEpoch.current || jumpId !== jumpGeneration.current) return;
+    if (target.groupId && activeGroupId.current !== target.groupId) return;
+    if (target.botId && activeBotId.current !== target.botId) return;
+    const targetInPage = userVisibleMessages(page.messages, { includePeerReceipts: true }).some(
+      (message) => message.id === target.messageId,
+    );
+    expandedHistoryThread.current = targetInPage ? page.threadId : null;
+    pinnedAroundRef.current = targetInPage
+      ? {
+          ...threadTarget,
+          messageId: target.messageId,
+          threadId: page.threadId,
+          messages: page.messages,
+          olderCursor: page.olderCursor,
+        }
+      : null;
+    if (targetInPage) initiallyScrolledThread.current = page.threadId;
+    commitSnapshot({
       ...snap,
-      messages: page.messages,
-      olderCursor: page.olderCursor,
+      messages: targetInPage ? page.messages : snap.messages,
+      olderCursor: targetInPage ? page.olderCursor : snap.olderCursor,
     });
-    setComputer(snap.computer ?? null);
-    setRoutines(await rpc.routines.list({ botId }));
-    setRoutinesBotId(botId);
+    if (threadTarget.botId) {
+      commitComputer(snap.computer ?? null);
+      // Don't block parent-scroll on routines metadata; a list failure must not abort the jump.
+      void rpc.routines
+        .list({ botId: threadTarget.botId })
+        .then((routines) => {
+          if (epoch !== historyEpoch.current || jumpId !== jumpGeneration.current) return;
+          if (activeBotId.current !== threadTarget.botId) return;
+          setRoutines(routines);
+          setRoutinesBotId(threadTarget.botId);
+        })
+        .catch(() => undefined);
+    } else {
+      commitComputer(null);
+      setRoutines([]);
+      setRoutinesBotId(null);
+    }
     window.requestAnimationFrame(() => {
+      if (epoch !== historyEpoch.current || jumpId !== jumpGeneration.current) return;
+      if (!targetInPage) {
+        const element = messageScroll.current;
+        if (element) {
+          element.scrollTop = element.scrollHeight;
+          initiallyScrolledThread.current = page.threadId;
+        }
+        return;
+      }
       document
-        .querySelector(`[data-message-id="${messageId}"]`)
+        .querySelector(`[data-message-id="${target.messageId}"]`)
         ?.scrollIntoView({ behavior: "smooth", block: "center" });
     });
   }
 
   useEffect(() => {
-    if (!active) return;
     const messageId = searchParams.get("m");
     const routineId = searchParams.get("routine");
+    if (inGroup && groupId && messageId) {
+      void jumpToMessage({ groupId, messageId }).finally(() => {
+        // Keep expandedHistoryThread; only strip the jump URL so refresh does not remount.
+        const next = new URLSearchParams(searchParams);
+        next.delete("m");
+        setSearchParams(next, { replace: true });
+      });
+      return;
+    }
+    if (!active) return;
     if (routineId && routinesBotId === active.id) {
       const routine = routines.find((item) => item.id === routineId);
       if (routine) {
-        setRoutineDraft({
-          name: routine.name,
-          prompt: routine.prompt,
-          schedule: presetFromCron(routine.cron),
-        });
+        setRoutineDraft(draftFromRoutine(routine));
+        setRoutineWebhookSecret(null);
+        setEditingRoutine(routine);
         setPanel("routine");
       } else {
         setPanel("computer");
@@ -861,13 +1591,13 @@ export function ShellPage() {
       setSearchParams(next, { replace: true });
     }
     if (messageId) {
-      void jumpToMessage(active.id, messageId).finally(() => {
+      void jumpToMessage({ botId: active.id, messageId }).finally(() => {
         const next = new URLSearchParams(searchParams);
         next.delete("m");
         setSearchParams(next, { replace: true });
       });
     }
-  }, [active?.id, routines, routinesBotId, searchParams, setSearchParams]);
+  }, [active?.id, groupId, inGroup, routines, routinesBotId, searchParams, setSearchParams]);
   const activeSnapshot = inGroup
     ? snapshot?.groupId === groupId
       ? snapshot
@@ -881,28 +1611,156 @@ export function ShellPage() {
       : null;
   const currentRuns = activeThreadRuns(activeSnapshot);
   const answerableAskMessageId = latestAnswerableAskMessageId(activeSnapshot);
-  const transcriptRunning = currentRuns.some((run) =>
+  const workingRuns = currentRuns.filter((run) =>
     ["running", "queued", "leased"].includes(run.status),
   );
+  const transcriptRunning = workingRuns.length > 0;
   const composerRunning = currentRuns.some((run) => isActive(run.status));
+  const runError = threadRunError(activeSnapshot, dismissedRunErrorIds);
+  const displayedRunError = !sendError ? runError : null;
+  const displayedRunErrorId = displayedRunError ? (activeSnapshot?.run?.id ?? null) : null;
+  const handleRunErrorPresented = useCallback((runId: string) => {
+    rememberSeenRunErrorId(runId);
+  }, []);
+  const transcriptMessages = useMemo(
+    () => userVisibleMessages(activeSnapshot?.messages ?? [], { includePeerReceipts: true }),
+    [activeSnapshot?.messages],
+  );
   const transcriptArtifactTarget = useMemo<ArtifactTarget>(
     () => (inGroup ? { groupId: groupId ?? "" } : { botId: active?.id ?? "" }),
     [active?.id, groupId, inGroup],
   );
   const transcriptMembers = activeSnapshot?.members ?? activeGroup?.members;
+  const resolveTranscriptBot = useCallback(
+    (botId: string) => {
+      const bot = bots.find((candidate) => candidate.id === botId);
+      if (bot) return bot;
+      return transcriptMembers?.find((member) => member.botId === botId);
+    },
+    [bots, transcriptMembers],
+  );
+  const workingBots: GroupAvatarMember[] = workingRuns.map((run) => {
+    const bot = resolveTranscriptBot(run.botId);
+    return {
+      botId: run.botId,
+      color: bot?.color ?? FALLBACK_BOT_COLOR,
+      name: bot?.name,
+      status: run.status,
+    };
+  });
   const resolveTranscriptMemberName = useCallback(
     (botId: string | undefined) => memberName(transcriptMembers, botId),
     [transcriptMembers],
   );
+  const replyTargetName = activeReplyTarget
+    ? activeReplyTarget.role === "user"
+      ? t`You`
+      : (resolveTranscriptMemberName(activeReplyTarget.botId) ?? active?.name ?? t`Bot`)
+    : undefined;
+  const composerMentionTargets = useMemo(
+    () =>
+      buildComposerMentionOptions({
+        query: "",
+        includeEveryone: inGroup,
+        currentGroupId: groupId,
+        bots: bots.map((bot) => ({ id: bot.id, name: bot.name, color: bot.color })),
+        groups: groups.map((group) => ({ id: group.id, name: group.name })),
+        routines: mentionRoutines.map((routine) => ({
+          id: routine.id,
+          name: routine.name,
+          crons: routine.crons,
+          botId: routine.botId,
+          botName: routine.botName,
+        })),
+        connectors: mentionConnectors,
+      }),
+    [bots, groupId, groups, inGroup, mentionConnectors, mentionRoutines],
+  );
   const shellReady =
     initialBotsLoaded &&
-    (inGroup ? Boolean(activeGroup && activeSnapshot) : Boolean(active && activeSnapshot));
+    (inGroup
+      ? Boolean(activeGroup && activeSnapshot)
+      : bots.length === 0 || Boolean(active && activeSnapshot));
   const refreshThreadRef = useRef(refreshThread);
   refreshThreadRef.current = refreshThread;
   const refreshGroupThreadRef = useRef(refreshGroupThread);
   refreshGroupThreadRef.current = refreshGroupThread;
   const loadOlderMessagesRef = useRef(loadOlderMessages);
   loadOlderMessagesRef.current = loadOlderMessages;
+  const jumpToMessageRef = useRef(jumpToMessage);
+  jumpToMessageRef.current = jumpToMessage;
+
+  const mentionBotsKey = useMemo(
+    () => bots.map((bot) => `${bot.id}:${bot.name}`).join(","),
+    [bots],
+  );
+  const botsForMentionsRef = useRef(bots);
+  botsForMentionsRef.current = bots;
+
+  useEffect(() => {
+    const bots = botsForMentionsRef.current;
+    if (!initialBotsLoaded || bots.length === 0) {
+      setMentionRoutines([]);
+      setMentionConnectors([]);
+      return;
+    }
+    let cancelled = false;
+    const botNameById = new Map(bots.map((bot) => [bot.id, bot.name]));
+    void Promise.all(
+      bots.map((bot) =>
+        rpc.routines
+          .list({ botId: bot.id })
+          .then((rows) =>
+            rows.map((routine) => ({
+              ...routine,
+              botName: botNameById.get(bot.id) ?? bot.name,
+            })),
+          )
+          .catch(() => [] as Array<Routine & { botName?: string }>),
+      ),
+    ).then((lists) => {
+      if (!cancelled) setMentionRoutines(lists.flat());
+    });
+    void Promise.all([
+      rpc.connections.list().catch(() => [] as Connection[]),
+      rpc.connections.catalog({}).catch(() => [] as ConnectionCatalogItem[]),
+    ]).then(([connections, catalog]) => {
+      if (cancelled) return;
+      const connected = connections.filter((row) => row.status === "connected");
+      const options: Array<{
+        id: string;
+        name: string;
+        authStatus: "connected" | "needs_auth";
+        connectionId?: string;
+      }> = connected.map((row) => ({
+        id: row.id,
+        name: row.displayName,
+        authStatus: "connected" as const,
+        connectionId: row.id,
+      }));
+      for (const item of catalog) {
+        if (item.connected || item.noAuth) continue;
+        if (
+          connected.some(
+            (row) =>
+              row.provider.toLowerCase() === item.slug.toLowerCase() ||
+              row.displayName.toLowerCase() === item.name.toLowerCase(),
+          )
+        ) {
+          continue;
+        }
+        options.push({
+          id: `catalog:${item.connectorId}:${item.slug}`,
+          name: item.name,
+          authStatus: "needs_auth",
+        });
+      }
+      setMentionConnectors(options);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [initialBotsLoaded, mentionBotsKey]);
 
   useLayoutEffect(() => {
     if (initialBotsLoaded) {
@@ -920,17 +1778,42 @@ export function ShellPage() {
   }, [active, initialBotsLoaded, shellReady, snapshot?.botId]);
 
   useLayoutEffect(() => {
-    if (!active || !snapshot || snapshot.botId !== active.id) return;
-    if (initiallyScrolledThread.current === snapshot.threadId) return;
-    if (pinnedAroundRef.current?.botId === active.id) return;
+    const pin = pinnedAroundRef.current;
+    if (inGroup) {
+      if (!groupId || !snapshot || snapshot.groupId !== groupId) return;
+      if (initiallyScrolledThread.current === snapshot.threadId) return;
+      if (expandedHistoryThread.current === snapshot.threadId) return;
+      if (pin?.groupId === groupId) return;
+    } else {
+      if (!active || !snapshot || snapshot.botId !== active.id) return;
+      if (initiallyScrolledThread.current === snapshot.threadId) return;
+      if (expandedHistoryThread.current === snapshot.threadId) return;
+      if (pin?.botId === active.id) return;
+    }
     const element = messageScroll.current;
     if (!element) return;
     element.scrollTop = element.scrollHeight;
     initiallyScrolledThread.current = snapshot.threadId;
-  }, [active, snapshot?.botId, snapshot?.threadId]);
+  }, [active, groupId, inGroup, snapshot?.botId, snapshot?.groupId, snapshot?.threadId]);
 
   const openBot = useCallback((id: string) => navigate(`/app/${id}`), [navigate]);
   const loadOlder = useCallback(() => loadOlderMessagesRef.current(), []);
+  const jumpToReplyMessage = useCallback((messageId: string) => {
+    const existing = document.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`);
+    if (existing) {
+      // Cancel any in-flight around-fetch so it cannot overwrite this scroll.
+      jumpGeneration.current += 1;
+      existing.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    const groupId = activeGroupId.current;
+    if (groupId) {
+      void jumpToMessageRef.current({ groupId, messageId });
+      return;
+    }
+    const botId = activeBotId.current;
+    if (botId) void jumpToMessageRef.current({ botId, messageId });
+  }, []);
   const answerMessage = useCallback(async (message: ThreadMessage, text: string) => {
     const botId = activeBotId.current;
     const groupId = activeGroupId.current;
@@ -947,6 +1830,28 @@ export function ShellPage() {
       await refreshThreadRef.current(botId);
     }
   }, []);
+  const reactToMessage = useCallback(
+    async (message: ThreadMessage, reaction: MessageReaction) => {
+      const botId = activeBotId.current;
+      const groupId = activeGroupId.current;
+      if (!botId && !groupId) return;
+      try {
+        await rpc.threads.react({
+          ...(groupId ? { groupId } : { botId: botId! }),
+          messageId: message.id,
+          reaction,
+          clientNonce: newClientNonce(),
+        });
+      } catch (error) {
+        const stillHere = groupId
+          ? activeGroupId.current === groupId
+          : activeBotId.current === botId;
+        if (!stillHere) return;
+        setSendError(error instanceof Error ? error.message : t`Could not update reaction`);
+      }
+    },
+    [t],
+  );
   const onAttachmentPick = useCallback(
     async (files: FileList | null) => {
       const threadKey = activeGroupId.current ?? activeBotId.current;
@@ -956,11 +1861,11 @@ export function ShellPage() {
       const skipped: string[] = [];
       for (const file of Array.from(files)) {
         if (existing.length + next.length >= ATTACHMENT_MAX_COUNT) {
-          skipped.push(`${file.name} (max ${ATTACHMENT_MAX_COUNT} attachments)`);
+          skipped.push(t`${file.name} (max ${ATTACHMENT_MAX_COUNT} attachments)`);
           continue;
         }
         if (file.size > ATTACHMENT_MAX_BYTES) {
-          skipped.push(`${file.name} (over 10 MiB)`);
+          skipped.push(t`${file.name} (over 10 MiB)`);
           continue;
         }
         const mimeType = inferAttachmentMimeType(file.name, file.type);
@@ -976,31 +1881,85 @@ export function ShellPage() {
         });
       }
       if (next.length) setPendingAttachments((current) => [...current, ...next]);
-      setAttachmentNotice(skipped.length ? `Skipped ${skipped.join(", ")}` : null);
+      setAttachmentNotice(skipped.length ? t`Skipped ${skipped.join(", ")}` : null);
       if (fileInputRef.current) fileInputRef.current.value = "";
     },
-    [pendingAttachments],
+    [pendingAttachments, t],
   );
   const removeAttachment = useCallback((attachment: PendingAttachment) => {
     revokePendingAttachmentPreviews([attachment]);
     setPendingAttachments((current) => current.filter((item) => item.id !== attachment.id));
   }, []);
   const sendMessage = useCallback(
-    async (text: string, mentions?: string[]) => {
-      const botTarget = activeBotId.current;
-      const groupTarget = activeGroupId.current;
-      if ((!botTarget && !groupTarget) || sending) return;
-      const attachments = attachmentsForThread(pendingAttachments, groupTarget ?? botTarget);
-      const trimmed = text.trim();
-      if (!trimmed && attachments.length === 0) return;
+    async (text: string, mentions: ComposerMention[] = []) => {
+      const initialBotTarget = activeBotId.current;
+      const initialGroupTarget = activeGroupId.current;
+      if ((!initialBotTarget && !initialGroupTarget) || sending) return;
+      const originThreadKey = initialGroupTarget ?? initialBotTarget;
+      const attachments = attachmentsForThread(pendingAttachments, originThreadKey);
+      const plan = resolveComposerSendPlan({
+        text,
+        mentions,
+        hasAttachments: attachments.length > 0,
+      });
+      if (plan.isNoOp) return;
+      const reroutedToGroup = Boolean(
+        plan.rerouteGroupId && plan.rerouteGroupId !== initialGroupTarget,
+      );
+      const groupTarget = plan.rerouteGroupId ?? initialGroupTarget;
+      const botTarget = reroutedToGroup ? undefined : initialBotTarget;
+      if (
+        plan.shouldSend &&
+        (groupTarget || botsRef.current.find((bot) => bot.id === botTarget)?.notifyOnFinish)
+      ) {
+        const permissionRequest = requestBrowserNotificationPermission();
+        if (permissionRequest) void permissionRequest.then(flushPendingBrowserNotifications);
+      }
+      const trimmed = plan.trimmed;
       setSending(true);
       setSendError(null);
+      const dropDelayedSetup = () => {
+        // Only after successful engagement so a failed upload/send keeps the setup card.
+        if (initialBotTarget && focusPromptBotIdRef.current === initialBotTarget) {
+          cancelFocusPrompt();
+        }
+      };
       try {
+        if (plan.shouldRunRoutines) {
+          const sendNonce = newClientNonce();
+          await Promise.all(
+            plan.routineIds.map((routineId) =>
+              rpc.routines.testRun({
+                routineId,
+                clientNonce: `routine-mention:${sendNonce}:${routineId}`,
+              }),
+            ),
+          );
+        }
+        if (!plan.shouldSend) {
+          dropDelayedSetup();
+          setReplyTarget(null);
+          revokePendingAttachmentPreviews(attachments);
+          setPendingAttachments((current) =>
+            current.filter((attachment) => attachment.threadKey !== originThreadKey),
+          );
+          setAttachmentNotice(null);
+          if (reroutedToGroup && groupTarget) {
+            navigate(`/app/g/${groupTarget}`);
+            return;
+          }
+          if (groupTarget && activeGroupId.current === groupTarget) {
+            await refreshGroupThreadRef.current(groupTarget);
+          } else if (botTarget && activeBotId.current === botTarget) {
+            await refreshThreadRef.current(botTarget);
+          }
+          return;
+        }
         const artifactIds: string[] = [];
         for (const pending of attachments) {
           const mimeType = inferAttachmentMimeType(pending.file.name, pending.file.type);
           if (!mimeType) {
-            throw new Error(`Unsupported file type: ${pending.file.name}`);
+            throw new Error(t`Unsupported file type: ${pending.file.name}`);
           }
           const contentBase64 = await readFileAsBase64(pending.file);
           const artifact = await rpc.artifacts.create(
@@ -1010,42 +1969,75 @@ export function ShellPage() {
           );
           artifactIds.push(artifact.id);
         }
+        const clientNonce = newClientNonce();
         if (groupTarget) {
           await rpc.threads.send({
             groupId: groupTarget,
+            clientNonce,
             text: trimmed || undefined,
-            mentions: mentions?.length ? mentions : undefined,
+            mentions: plan.mentionPayload.length ? plan.mentionPayload : undefined,
             artifactIds: artifactIds.length ? artifactIds : undefined,
-            replyToMessageId: activeReplyTarget?.id,
+            replyToMessageId: reroutedToGroup ? undefined : activeReplyTarget?.id,
           });
         } else if (botTarget) {
-          await rpc.threads.send({
+          const sent = await rpc.threads.send({
             botId: botTarget,
+            clientNonce,
             text: trimmed || undefined,
+            mentions: plan.mentionPayload.length ? plan.mentionPayload : undefined,
             artifactIds: artifactIds.length ? artifactIds : undefined,
             replyToMessageId: activeReplyTarget?.id,
           });
+          if (activeBotId.current === botTarget) {
+            updateSnapshot((current) =>
+              applyThreadSendReceipt(
+                current,
+                {
+                  botId: botTarget,
+                  runId: sent.runId,
+                  taskId: sent.taskId,
+                },
+                terminalRunReceipts.current,
+              ),
+            );
+          }
         }
+        dropDelayedSetup();
         setReplyTarget(null);
         revokePendingAttachmentPreviews(attachments);
         setPendingAttachments((current) =>
-          current.filter((attachment) => attachment.threadKey !== (groupTarget ?? botTarget)),
+          current.filter((attachment) => attachment.threadKey !== originThreadKey),
         );
+        // Refresh sidebar status even when a bot→group reroute navigates away below.
+        void refreshBots().catch(() => undefined);
+        if (reroutedToGroup && groupTarget) {
+          navigate(`/app/g/${groupTarget}`);
+          return;
+        }
         if (groupTarget && activeGroupId.current === groupTarget) setAttachmentNotice(null);
         if (botTarget && activeBotId.current === botTarget) setAttachmentNotice(null);
         if (groupTarget) await refreshGroupThreadRef.current(groupTarget);
         else if (botTarget) await refreshThreadRef.current(botTarget);
       } catch (error) {
-        if (groupTarget && activeGroupId.current === groupTarget) {
-          setSendError(error instanceof Error ? error.message : "Failed to send message");
+        if (reroutedToGroup && groupTarget) {
+          setSendError(error instanceof Error ? error.message : t`Failed to send message`);
+        } else if (groupTarget && activeGroupId.current === groupTarget) {
+          setSendError(error instanceof Error ? error.message : t`Failed to send message`);
         } else if (botTarget && activeBotId.current === botTarget) {
-          setSendError(error instanceof Error ? error.message : "Failed to send message");
+          setSendError(error instanceof Error ? error.message : t`Failed to send message`);
         }
       } finally {
         setSending(false);
       }
     },
-    [activeReplyTarget?.id, pendingAttachments, sending],
+    [
+      activeReplyTarget?.id,
+      flushPendingBrowserNotifications,
+      navigate,
+      pendingAttachments,
+      sending,
+      t,
+    ],
   );
   const followUpMessage = useCallback(async (text: string) => {
     const id = activeBotId.current;
@@ -1054,17 +2046,57 @@ export function ShellPage() {
     await refreshThreadRef.current(id);
   }, []);
   const stopRun = useCallback(async () => {
-    const botTarget = activeBotId.current;
-    const groupTarget = activeGroupId.current;
-    if (groupTarget) {
-      await rpc.threads.stop({ groupId: groupTarget });
-      await refreshGroupThreadRef.current(groupTarget);
-      return;
+    if (sending) return;
+    setSending(true);
+    try {
+      const botTarget = activeBotId.current;
+      const groupTarget = activeGroupId.current;
+      if (groupTarget) {
+        setSendError(null);
+        try {
+          await rpc.threads.stop({ groupId: groupTarget });
+        } catch (error) {
+          if (activeGroupId.current === groupTarget) {
+            setSendError(error instanceof Error ? error.message : t`Failed to stop`);
+          }
+          return;
+        }
+        // Stop has no terminal event; clear run UI before refresh races with in-flight gets.
+        if (activeGroupId.current === groupTarget) {
+          updateSnapshot((prev) =>
+            prev && prev.groupId === groupTarget ? clearActiveThreadRuns(prev) : prev,
+          );
+        }
+        await refreshGroupThreadRef.current(groupTarget).catch(() => undefined);
+        return;
+      }
+      if (!botTarget) return;
+      setSendError(null);
+      try {
+        await rpc.threads.stop({ botId: botTarget });
+      } catch (error) {
+        if (activeBotId.current === botTarget) {
+          setSendError(error instanceof Error ? error.message : t`Failed to stop`);
+        }
+        return;
+      }
+      // Stop does not emit a terminal thread event. Clear local run/busy immediately so a
+      // superseded in-flight refresh (older cursor) cannot leave Stop enabled / Take control
+      // blocked while the API is already idle.
+      if (activeBotId.current === botTarget) {
+        updateSnapshot((prev) =>
+          !prev || (prev.botId !== botTarget && prev.botId) ? prev : clearActiveThreadRuns(prev),
+        );
+        const currentComputer = computerRef.current;
+        if (currentComputer?.busyBotName) {
+          commitComputer({ ...currentComputer, busyBotName: null });
+        }
+      }
+      await refreshThreadRef.current(botTarget).catch(() => undefined);
+    } finally {
+      setSending(false);
     }
-    if (!botTarget) return;
-    await rpc.threads.stop({ botId: botTarget });
-    await refreshThreadRef.current(botTarget);
-  }, []);
+  }, [sending, t]);
   const stopTeaching = useCallback(async () => {
     const id = activeBotId.current;
     if (!id || teachBusy) return;
@@ -1093,8 +2125,21 @@ export function ShellPage() {
     if (!id) return;
     await refreshThreadRef.current(id);
   }, []);
+  // Teach chrome needs skills applied before this resolves — refreshThread only
+  // kicks skills.list off in the background, so Stop teaching would never mount
+  // if that background call failed or lagged behind local recovery.
+  const refreshActiveTeaching = useCallback(async () => {
+    const id = activeBotId.current;
+    if (!id) return;
+    await refreshThreadRef.current(id);
+    const skills = await rpc.skills.list({ botId: id });
+    if (activeBotId.current !== id) return;
+    setTaughtSkills(skills);
+    setTaughtSkillsBotId(id);
+  }, []);
   const addSkillRoutine = useCallback((name: string, prompt: string) => {
-    setRoutineDraft({ name, prompt, schedule: defaultCronPreset() });
+    setRoutineDraft({ ...emptyRoutineDraft(), name, prompt });
+    setRoutineWebhookSecret(null);
     setEditingRoutine(null);
     setPanel("routine");
   }, []);
@@ -1120,12 +2165,29 @@ export function ShellPage() {
     await refreshBots().catch(() => undefined);
   }
 
+  function cancelFocusPrompt() {
+    focusPromptAbortRef.current?.abort();
+    focusPromptAbortRef.current = null;
+    focusPromptBotIdRef.current = null;
+  }
+
+  function setBotsSidebarCollapsedPref(collapsed: boolean) {
+    setBotsSidebarCollapsed(collapsed);
+    writeBotsSidebarCollapsed(userId, collapsed);
+  }
+
+  function openSettings(section: SettingsSection = "general") {
+    setSettingsSection(section);
+    setSettingsOpen(true);
+  }
+
   async function createBot(input: {
     name: string;
     title: string;
     description: string;
     computerMode: ComputerMode;
   }) {
+    const isFirstBot = botsRef.current.length === 0;
     const bot = await rpc.bots.create({
       ...normalizeCreateBotProfile(input),
       notifyOnFinish: true,
@@ -1136,6 +2198,37 @@ export function ShellPage() {
     );
     navigate(`/app/${bot.id}`);
     setPanel(null);
+    // Register cancellation before awaiting start so leaving the bot during
+    // startup cannot miss the abort and still schedule a late focus card.
+    cancelFocusPrompt();
+    const controller = new AbortController();
+    focusPromptAbortRef.current = controller;
+    focusPromptBotIdRef.current = bot.id;
+    const started = await rpc.onboarding
+      .start({ botId: bot.id })
+      .then(() => true)
+      .catch(() => false);
+    if (!started || controller.signal.aborted || focusPromptBotIdRef.current !== bot.id) {
+      if (focusPromptAbortRef.current === controller) {
+        focusPromptAbortRef.current = null;
+        focusPromptBotIdRef.current = null;
+      }
+      await refreshBots().catch(() => undefined);
+      return;
+    }
+    void scheduleFocusPrompt({
+      immediate: isFirstBot,
+      signal: controller.signal,
+      prompt: async () => {
+        if (focusPromptBotIdRef.current !== bot.id || activeBotId.current !== bot.id) return;
+        await rpc.onboarding.promptFocus({ botId: bot.id }).catch(() => undefined);
+      },
+    }).finally(() => {
+      if (focusPromptAbortRef.current === controller) {
+        focusPromptAbortRef.current = null;
+        focusPromptBotIdRef.current = null;
+      }
+    });
     await refreshBots().catch(() => undefined);
   }
 
@@ -1151,10 +2244,16 @@ export function ShellPage() {
     if (!active) return;
     const needsBoot = force || computer?.state !== "running" || !screenUrl;
     if (overlay && needsBoot) setBooting(true);
+    setComputerError(null);
+    setComputerErrorFromScreen(false);
     try {
       if (needsBoot) await rpc.computer.boot({ botId: active.id });
       if (takeControl) await rpc.computer.takeover({ botId: active.id });
       await refreshThread(active.id);
+    } catch (error) {
+      setComputerError(error instanceof Error ? error.message : t`Could not take control`);
+      setComputerErrorFromScreen(false);
+      throw error;
     } finally {
       setBooting(false);
     }
@@ -1183,11 +2282,12 @@ export function ShellPage() {
       }
       if (action === "boot" && autoBooted.current === botId) return;
       autoBooted.current = botId;
+      if (!computerPanelAutoUsesBoot(action)) return;
       await bootComputer({
         takeControl: false,
         overlay: action === "boot",
         force: true,
-      });
+      }).catch(() => undefined);
     })();
     return () => {
       cancelled = true;
@@ -1196,7 +2296,24 @@ export function ShellPage() {
 
   useEffect(() => {
     setComputerOpen(false);
+    setComputerError(null);
+    setComputerErrorFromScreen(false);
   }, [active?.id]);
+
+  useEffect(() => {
+    if (focusPromptBotIdRef.current && focusPromptBotIdRef.current !== active?.id) {
+      cancelFocusPrompt();
+    }
+  }, [active?.id]);
+
+  useEffect(() => () => cancelFocusPrompt(), []);
+
+  useEffect(() => {
+    if (!computer?.busyBotName) {
+      setComputerError(null);
+      setComputerErrorFromScreen(false);
+    }
+  }, [computer?.busyBotName]);
 
   useEffect(() => {
     if (panel !== "routine") {
@@ -1236,6 +2353,16 @@ export function ShellPage() {
   }, [computerOpen]);
 
   useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      if (!isCommandPaletteHotkey(event)) return;
+      event.preventDefault();
+      setCommandPaletteOpen((open) => !open);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  useEffect(() => {
     if ((panel !== "computer" && !computerOpen) || !active || computer?.state !== "running") return;
     const ping = () => void rpc.computer.heartbeat({ botId: active.id }).catch(() => undefined);
     ping();
@@ -1246,25 +2373,66 @@ export function ShellPage() {
   async function openComputer() {
     if (!active) return;
     const needsTakeover = !userHoldsComputerControl(computer, active.id);
-    await bootComputer({
-      takeControl: needsTakeover,
-      overlay: needsTakeover || computer?.state !== "running",
-      force: computer?.state !== "running",
-    });
-    setComputerOpen(true);
+    const blocked = computerTakeoverBlocked(computer, snapshot?.run?.status);
+    try {
+      await bootComputer({
+        takeControl: needsTakeover && !blocked,
+        overlay: (needsTakeover && !blocked) || computer?.state !== "running",
+        force: computer?.state !== "running",
+      });
+      setComputerOpen(true);
+    } catch {
+      // computerError already set in bootComputer
+    }
   }
 
-  async function releaseComputer(reason?: ComputerReleaseReason) {
-    if (!active) return;
-    setComputerOpen(false);
-    await rpc.computer.release({ botId: active.id, reason }).catch(() => undefined);
-    await refreshThread(active.id);
+  const releaseComputer = useCallback(
+    async (reason?: ComputerReleaseReason) => {
+      const botId = activeBotId.current;
+      if (!botId) return;
+      try {
+        await rpc.computer.release({ botId, reason });
+        if (activeBotId.current !== botId) return;
+        setComputerOpen(false);
+        await refreshThreadRef.current(botId).catch(() => undefined);
+      } catch {
+        if (activeBotId.current !== botId) return;
+        setComputerError(t`Could not continue`);
+        setComputerErrorFromScreen(false);
+      }
+    },
+    [t],
+  );
+
+  function dismissComposerError() {
+    // The strip shows one message at a time, so only dismiss the run failure when it is the
+    // one on screen; otherwise a live run would be silenced before it has even failed.
+    const failedRunId = displayedRunErrorId;
+    setSendError(null);
+    if (failedRunId) {
+      rememberSeenRunErrorId(failedRunId);
+      setDismissedRunErrorIds((current) => new Set(current).add(failedRunId));
+    }
   }
 
   const embeddedScreenUrl = embeddableScreenUrl(screenUrl);
   const hasControl = userHoldsComputerControl(computer, active?.id);
+  const hideScreenLoadError = computerErrorFromScreen && Boolean(embeddedScreenUrl);
+  const computerScreenError =
+    computerError && !hideScreenLoadError ? (
+      <div role="alert" className="flex flex-col items-center gap-3 px-6 text-center text-sm">
+        <p className="text-destructive">{computerError}</p>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => active && void refreshComputerScreen(active.id)}
+        >
+          <Trans>Retry screen</Trans>
+        </Button>
+      </div>
+    ) : null;
 
-  const userName = session.data?.user.name ?? "You";
+  const userName = session.data?.user.name ?? t`You`;
   const initials = userName
     .split(" ")
     .map((p) => p[0])
@@ -1272,348 +2440,686 @@ export function ShellPage() {
     .slice(0, 2)
     .toUpperCase();
 
-  return (
+  const shell = (
     <div
       data-testid="shell-root"
       data-ready={shellReady}
-      className="relative flex h-full min-w-0 overflow-hidden bg-[#050506] text-[#DFDFE2]"
+      className="relative flex h-full min-w-0 overflow-hidden bg-background text-foreground/90"
+      onTouchStartCapture={(event) => {
+        if (
+          mobileSidebarOpen ||
+          event.touches.length !== 1 ||
+          window.matchMedia("(min-width: 768px)").matches
+        ) {
+          mobileSidebarSwipeRef.current = null;
+          return;
+        }
+        const touch = event.touches[0];
+        if (!touch) return;
+        const rtl = document.documentElement.getAttribute("dir") === "rtl";
+        const startsAtEdge = rtl
+          ? touch.clientX >= window.innerWidth - MOBILE_SIDEBAR_SWIPE_EDGE_PX
+          : touch.clientX <= MOBILE_SIDEBAR_SWIPE_EDGE_PX;
+        mobileSidebarSwipeRef.current = startsAtEdge
+          ? { startX: touch.clientX, startY: touch.clientY }
+          : null;
+      }}
+      onTouchEndCapture={(event) => {
+        const swipe = mobileSidebarSwipeRef.current;
+        mobileSidebarSwipeRef.current = null;
+        const touch = event.changedTouches[0];
+        if (
+          !swipe ||
+          !touch ||
+          mobileSidebarOpen ||
+          window.matchMedia("(min-width: 768px)").matches
+        ) {
+          return;
+        }
+        const rtl = document.documentElement.getAttribute("dir") === "rtl";
+        const horizontal = rtl ? swipe.startX - touch.clientX : touch.clientX - swipe.startX;
+        const vertical = Math.abs(touch.clientY - swipe.startY);
+        if (horizontal >= MOBILE_SIDEBAR_SWIPE_DISTANCE_PX && horizontal > vertical * 1.25) {
+          setMobileSidebarOpen(true);
+        }
+      }}
+      onTouchCancelCapture={() => {
+        mobileSidebarSwipeRef.current = null;
+      }}
     >
+      <ComputerUpdateProgress
+        onCompleted={() => {
+          if (active) void refreshThread(active.id);
+        }}
+      />
       {bootstrapMe !== undefined ? (
         <HostComputerPrompt initialMe={bootstrapMe ?? undefined} />
       ) : null}
       {mobileSidebarOpen ? (
         <button
           type="button"
-          aria-label="Close navigation"
+          aria-label={t`Close navigation`}
           onClick={() => setMobileSidebarOpen(false)}
-          className="absolute inset-y-0 end-0 start-[min(calc(100%-48px),316px)] z-30 bg-black/60 md:hidden"
+          className="absolute inset-y-0 end-0 start-[min(calc(100%-48px),316px)] z-30 bg-overlay md:hidden"
+        />
+      ) : null}
+      {!mobileSidebarOpen ? (
+        <div
+          data-testid="mobile-sidebar-swipe-edge"
+          aria-hidden="true"
+          className="absolute bottom-20 start-0 top-16 z-20 w-8 touch-none md:hidden"
         />
       ) : null}
       <aside
-        className={`absolute inset-y-0 start-0 z-40 flex w-[calc(100%-48px)] max-w-[316px] shrink-0 flex-col border-e border-[#171719] bg-[#0B0B0C] transition-transform md:static md:z-auto md:w-[316px] md:translate-x-0 ${
+        data-testid="bots-sidebar"
+        data-collapsed={botsSidebarCollapsed ? "true" : "false"}
+        inert={botsSidebarCollapsed && !mobileSidebarOpen ? true : undefined}
+        className={`absolute inset-y-0 start-0 z-40 flex w-[calc(100%-48px)] max-w-[316px] shrink-0 flex-col border-e border-sidebar-border bg-sidebar transition-[transform,width,opacity] md:static md:z-auto md:translate-x-0 ${
           mobileSidebarOpen ? "translate-x-0" : "-translate-x-full rtl:translate-x-full"
+        } ${
+          botsSidebarCollapsed
+            ? "md:w-0 md:max-w-0 md:overflow-hidden md:border-e-0 md:opacity-0 md:pointer-events-none"
+            : "md:w-[316px]"
         }`}
       >
         <div className="app-drag flex items-center justify-between px-[18px] pb-3 pt-4">
           <WindowChrome />
-          <div className="relative">
+          <div className="relative flex items-center gap-2.5">
             <button
               type="button"
-              onClick={() => setCreateMenuOpen((open) => !open)}
-              className="app-no-drag text-[21px] text-[#7A7A80] hover:text-[#C9C9CE]"
-              title="Create"
+              aria-label={t`Activity`}
+              aria-pressed={activityMode}
+              title={t`Activity`}
+              data-activity-mode={activityMode ? "on" : "off"}
+              onClick={toggleActivityMode}
+              className={`app-no-drag flex h-7 w-7 items-center justify-center rounded-full ${
+                activityMode
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground/70 hover:text-foreground/75"
+              }`}
             >
-              +
+              <Bell
+                size={15}
+                strokeWidth={1.8}
+                fill={activityMode ? "currentColor" : "none"}
+                aria-hidden="true"
+              />
             </button>
-            {createMenuOpen ? (
-              <div className="app-no-drag absolute end-0 top-full z-20 mt-2 min-w-[160px] rounded-xl border border-[#26262A] bg-[#141416] py-1 shadow-lg">
-                <button
-                  type="button"
-                  className="block w-full px-3.5 py-2 text-start text-[14px] text-[#ECECEE] hover:bg-[#1A1A1D]"
-                  onClick={() => {
-                    setCreateMenuOpen(false);
-                    setPanel("create");
-                  }}
+            <button
+              type="button"
+              className="app-no-drag hidden h-7 w-7 items-center justify-center rounded-full text-muted-foreground/70 hover:text-foreground/75 md:inline-flex"
+              aria-label={t`Minimize bots`}
+              title={t`Minimize bots`}
+              data-testid="minimize-bots-sidebar"
+              onClick={() => setBotsSidebarCollapsedPref(true)}
+            >
+              <PanelLeftClose size={15} strokeWidth={1.8} aria-hidden="true" />
+            </button>
+            <Popover open={createMenuOpen} onOpenChange={setCreateMenuOpen}>
+              <PopoverTrigger
+                className="app-no-drag text-[21px] text-muted-foreground/70 hover:text-foreground/75"
+                title={t`Create`}
+                data-testid="create-menu-trigger"
+              >
+                +
+              </PopoverTrigger>
+              {/* Unmount with the state change so the panel it opens never coexists with the menu. */}
+              {createMenuOpen ? (
+                <PopoverContent
+                  align="end"
+                  className="app-no-drag w-auto gap-0 overflow-hidden p-0 data-closed:animate-none"
                 >
-                  New bot
-                </button>
-                <button
-                  type="button"
-                  className="block w-full px-3.5 py-2 text-start text-[14px] text-[#ECECEE] hover:bg-[#1A1A1D]"
-                  onClick={() => {
-                    setCreateMenuOpen(false);
-                    setPanel("create-group");
-                  }}
-                >
-                  New group
-                </button>
-              </div>
-            ) : null}
+                  <BotCreatePicker
+                    bots={bots}
+                    onCreateBot={() => {
+                      setCreateMenuOpen(false);
+                      setMobileSidebarOpen(false);
+                      setPanel("create");
+                    }}
+                    onOpenBot={(id) => {
+                      setCreateMenuOpen(false);
+                      setMobileSidebarOpen(false);
+                      navigate(`/app/${id}`);
+                    }}
+                    onCreateGroup={() => {
+                      setCreateMenuOpen(false);
+                      setMobileSidebarOpen(false);
+                      setPanel("create-group");
+                    }}
+                    onCreateSpace={() => {
+                      setCreateMenuOpen(false);
+                      setMobileSidebarOpen(false);
+                      setNewSpaceOpen(true);
+                    }}
+                    onShowGroupInfo={() => {
+                      setCreateMenuOpen(false);
+                      setMobileSidebarOpen(false);
+                      setPickerInfoTopic("group");
+                    }}
+                    onShowSpaceInfo={() => {
+                      setCreateMenuOpen(false);
+                      setMobileSidebarOpen(false);
+                      setPickerInfoTopic("space");
+                    }}
+                  />
+                </PopoverContent>
+              ) : null}
+            </Popover>
           </div>
         </div>
-        <div className="mx-3.5 mb-3 flex items-center gap-2.5 rounded-xl border border-[#202023] bg-[#141416] px-3 py-2 text-[14px] text-[#6C6C70]">
-          <span>⌕</span>
-          <input
+        <InputGroup
+          data-testid="sidebar-search"
+          className="mx-2.5 mb-3 w-auto rounded-xl bg-card dark:bg-input"
+        >
+          <InputGroupAddon>
+            <Search size={16} strokeWidth={1.8} aria-hidden="true" />
+          </InputGroupAddon>
+          <InputGroupInput
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search"
-            className="w-full bg-transparent outline-none"
+            placeholder={t`Search`}
+            autoComplete="off"
+            name="sidebar-search"
           />
-        </div>
+        </InputGroup>
         <div className="rk-scroll flex flex-1 flex-col gap-0.5 overflow-y-auto px-2.5 pb-2.5">
-          {showWorkspaceSearch ? (
-            <WorkspaceSearchResults
+          {showSpaceSearch ? (
+            <SpaceSearchResults
               hits={searchHits}
               loading={searchLoading}
               onSelect={(hit) => void jumpToSearchHit(hit)}
             />
           ) : (
-            sidebarGroups.map((group) => (
-              <div key={group.key} data-sidebar-group={group.key}>
-                {group.title ? (
-                  <div className="px-2.5 pb-1 pt-3 text-[12.5px] font-medium text-[#6C6C70]">
-                    {group.title}
-                  </div>
-                ) : null}
-                {group.bots.map((bot) => (
-                  <button
-                    key={bot.id}
-                    type="button"
-                    onClick={() => {
-                      setMobileSidebarOpen(false);
-                      navigate(`/app/${bot.id}`);
-                    }}
-                    onContextMenu={(event) => {
-                      event.preventDefault();
-                      setBotMenu({
-                        botId: bot.id,
-                        position: { x: event.clientX, y: event.clientY },
-                      });
-                    }}
-                    className="flex w-full gap-3 rounded-xl px-2.5 py-[11px] text-start"
-                    style={{
-                      background: !inGroup && active?.id === bot.id ? "#161618" : "transparent",
-                    }}
-                  >
-                    <BotAvatar color={bot.color} size={38} status={bot.status} />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-baseline justify-between gap-2">
-                        <span
-                          dir="auto"
-                          className={`truncate text-[15px] text-[#ECECEE] ${
-                            bot.unread ? "font-semibold" : "font-medium"
-                          }`}
-                        >
-                          {bot.name}
-                          {bot.unread ? <span className="sr-only"> (unread)</span> : null}
-                        </span>
-                        <span className="flex shrink-0 items-center gap-1.5 text-[12.5px] text-[#6C6C70]">
-                          {bot.status === "idle" ? "" : bot.status}
-                          {bot.unread ? (
-                            <span
-                              aria-hidden="true"
-                              className="inline-block h-2 w-2 rounded-full bg-[#8B5CF6]"
-                            />
-                          ) : null}
-                        </span>
-                      </div>
-                      <div
-                        dir="auto"
-                        className={`mt-0.5 truncate text-[13.5px] ${
-                          bot.unread ? "font-medium text-[#C9C9CE]" : "text-[#85858A]"
-                        }`}
-                      >
-                        {bot.preview || bot.title}
-                      </div>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            ))
-          )}
-          {!showWorkspaceSearch
-            ? groups.map((group) => (
-                <button
-                  key={group.id}
-                  type="button"
-                  onClick={() => {
+            <>
+              {activityMode ? (
+                <ActivityList
+                  onOpenRun={(run) => {
                     setMobileSidebarOpen(false);
-                    navigate(`/app/g/${group.id}`);
+                    if (run.groupId) navigate(`/app/g/${run.groupId}`);
+                    else navigate(`/app/${run.botId}`);
                   }}
-                  className="flex gap-3 rounded-xl px-2.5 py-[11px] text-start"
-                  style={{
-                    background: inGroup && activeGroup?.id === group.id ? "#161618" : "transparent",
-                  }}
-                >
-                  <GroupAvatar
-                    members={
-                      group.id === activeSnapshot?.groupId
-                        ? (activeSnapshot.members ?? group.members)
-                        : group.members
-                    }
-                    size={38}
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-baseline justify-between gap-2">
-                      <span
-                        dir="auto"
-                        className={`min-w-0 truncate text-[15px] text-[#ECECEE] ${
-                          group.unread ? "font-semibold" : "font-medium"
-                        }`}
-                      >
-                        {group.name}
-                      </span>
-                      {group.unread ? (
-                        <span
-                          aria-hidden="true"
-                          className="inline-block h-2 w-2 rounded-full bg-[#8B5CF6]"
-                        />
-                      ) : null}
-                    </div>
-                    <div dir="auto" className="mt-0.5 truncate text-[13.5px] text-[#85858A]">
-                      {group.members.map((member) => member.name).join(", ")}
-                    </div>
+                />
+              ) : null}
+              {sidebarGroups.map((group) => {
+                const collapsed = Boolean(group.title) && collapsedSidebarSections.has(group.key);
+                const groupBotIds = group.bots.flatMap((item) =>
+                  item.kind === "bot" ? [item.chat.id] : [],
+                );
+                return (
+                  <div key={group.key} data-sidebar-group={group.key}>
+                    {group.title ? (
+                      <div className="flex items-center pt-2">
+                        <button
+                          type="button"
+                          className="flex min-w-0 flex-1 items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-[12.5px] font-medium text-muted-foreground/80 hover:bg-sidebar-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring"
+                          onClick={() => {
+                            if (group.emptySpaceId) {
+                              openSpaceChat(group.emptySpaceId, "/onboarding");
+                              return;
+                            }
+                            toggleSidebarSection(group.key);
+                          }}
+                          onContextMenu={
+                            group.canDeleteSpace
+                              ? (event) => {
+                                  event.preventDefault();
+                                  spaceMenuAnchor.current = event.currentTarget;
+                                  setSpaceMenu({
+                                    id: group.spaceId,
+                                    position: { x: event.clientX, y: event.clientY },
+                                  });
+                                }
+                              : undefined
+                          }
+                          aria-expanded={group.emptySpaceId ? undefined : !collapsed}
+                          aria-label={
+                            group.emptySpaceId
+                              ? t`Open ${group.title}`
+                              : collapsed
+                                ? t`Expand ${group.title}`
+                                : t`Collapse ${group.title}`
+                          }
+                        >
+                          <span className="flex min-w-0 items-center gap-1.5 truncate">
+                            {group.showLock ? (
+                              <Lock size={11} strokeWidth={2} aria-hidden="true" />
+                            ) : null}
+                            <span className="truncate">{group.title}</span>
+                          </span>
+                          {group.emptySpaceId ? null : (
+                            <ChevronDown
+                              size={14}
+                              strokeWidth={1.8}
+                              className={
+                                collapsed
+                                  ? "-rotate-90 transition-transform"
+                                  : "transition-transform"
+                              }
+                              aria-hidden="true"
+                            />
+                          )}
+                        </button>
+                        {group.canDeleteSpace ? (
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            aria-label={t`Actions for ${group.spaceName}`}
+                            onClick={(event) => {
+                              const rect = event.currentTarget.getBoundingClientRect();
+                              spaceMenuAnchor.current = event.currentTarget;
+                              setSpaceMenu({
+                                id: group.spaceId,
+                                position: { x: rect.left, y: rect.bottom },
+                              });
+                            }}
+                          >
+                            <MoreHorizontal size={14} aria-hidden="true" />
+                          </Button>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    {!collapsed &&
+                      group.bots.map((item) => (
+                        <button
+                          key={`${item.kind}:${item.chat.id}`}
+                          type="button"
+                          draggable={item.kind === "bot"}
+                          data-roster-bot-id={item.kind === "bot" ? item.chat.id : undefined}
+                          aria-keyshortcuts={
+                            item.kind === "bot" ? "Alt+ArrowUp Alt+ArrowDown" : undefined
+                          }
+                          onDragStart={(event) => {
+                            if (item.kind !== "bot") return;
+                            setDraggedBotId(item.chat.id);
+                            event.dataTransfer.effectAllowed = "move";
+                            event.dataTransfer.setData("text/plain", item.chat.id);
+                          }}
+                          onDragOver={(event) => {
+                            if (
+                              item.kind === "bot" &&
+                              draggedBotId &&
+                              groupBotIds.includes(draggedBotId)
+                            ) {
+                              event.preventDefault();
+                              event.dataTransfer.dropEffect = "move";
+                            }
+                          }}
+                          onDrop={(event) => {
+                            if (item.kind !== "bot" || !draggedBotId) return;
+                            event.preventDefault();
+                            reorderRosterBot(draggedBotId, item.chat.id, groupBotIds);
+                            setDraggedBotId(null);
+                          }}
+                          onDragEnd={() => setDraggedBotId(null)}
+                          onKeyDown={(event) => {
+                            if (
+                              item.kind !== "bot" ||
+                              !event.altKey ||
+                              (event.key !== "ArrowUp" && event.key !== "ArrowDown")
+                            )
+                              return;
+                            const index = groupBotIds.indexOf(item.chat.id);
+                            const target = groupBotIds[index + (event.key === "ArrowUp" ? -1 : 1)];
+                            if (!target) return;
+                            event.preventDefault();
+                            reorderRosterBot(item.chat.id, target, groupBotIds);
+                          }}
+                          onClick={() => {
+                            openSpaceChat(
+                              item.chat.spaceId,
+                              item.kind === "bot"
+                                ? `/app/${item.chat.id}`
+                                : `/app/g/${item.chat.id}`,
+                            );
+                          }}
+                          onContextMenu={(event) => {
+                            if (item.chat.spaceId !== bootstrapMe?.spaceId) return;
+                            event.preventDefault();
+                            botMenuAnchor.current = event.currentTarget;
+                            setBotMenu({
+                              kind: item.kind,
+                              id: item.chat.id,
+                              position: { x: event.clientX, y: event.clientY },
+                            });
+                          }}
+                          className={`flex w-full gap-3 rounded-xl px-2.5 py-[11px] text-start ${
+                            item.kind === "bot" ? "cursor-grab active:cursor-grabbing" : ""
+                          } ${
+                            (item.kind === "bot" && !inGroup && active?.id === item.chat.id) ||
+                            (item.kind === "group" && inGroup && activeGroup?.id === item.chat.id)
+                              ? "bg-sidebar-accent"
+                              : "hover:bg-sidebar-accent"
+                          }`}
+                          style={{
+                            opacity:
+                              item.kind === "bot" && draggedBotId === item.chat.id ? 0.55 : 1,
+                          }}
+                        >
+                          {item.kind === "bot" ? (
+                            <BotAvatar
+                              color={item.chat.color}
+                              identity={item.chat.id}
+                              size={38}
+                              status={item.chat.status}
+                            />
+                          ) : (
+                            <GroupAvatar
+                              members={
+                                item.chat.id === activeSnapshot?.groupId
+                                  ? (activeSnapshot.members ?? item.chat.members)
+                                  : item.chat.members
+                              }
+                              size={38}
+                            />
+                          )}
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-baseline justify-between gap-2">
+                              <span
+                                dir="auto"
+                                data-roster-bot-name={item.kind === "bot" ? "" : undefined}
+                                className={`truncate text-[15px] text-foreground ${
+                                  item.chat.unread ? "font-semibold" : "font-medium"
+                                }`}
+                              >
+                                {item.chat.name}
+                                {item.chat.unread ? (
+                                  <span className="sr-only">
+                                    <Trans> (unread)</Trans>
+                                  </span>
+                                ) : null}
+                              </span>
+                              <span className="flex shrink-0 items-center gap-1.5 text-[12.5px] text-muted-foreground/80">
+                                {item.kind === "bot" && item.chat.status !== "idle"
+                                  ? item.chat.status
+                                  : ""}
+                                {item.chat.unread ? (
+                                  <span
+                                    aria-hidden="true"
+                                    className="inline-block h-2 w-2 rounded-full bg-foreground"
+                                  />
+                                ) : null}
+                              </span>
+                            </div>
+                            {item.kind === "bot" && item.chat.title ? (
+                              <>
+                                <div
+                                  dir="auto"
+                                  className={`mt-0.5 truncate text-[13.5px] ${
+                                    item.chat.unread
+                                      ? "font-medium text-foreground/75"
+                                      : "text-muted-foreground"
+                                  }`}
+                                >
+                                  {item.chat.title}
+                                </div>
+                                {item.chat.preview ? (
+                                  <div
+                                    dir="auto"
+                                    className="truncate text-[12.5px] text-muted-foreground/80"
+                                  >
+                                    {item.chat.preview}
+                                  </div>
+                                ) : null}
+                              </>
+                            ) : (
+                              <div
+                                dir="auto"
+                                className={`mt-0.5 truncate text-[13.5px] ${
+                                  item.chat.unread
+                                    ? "font-medium text-foreground/75"
+                                    : "text-muted-foreground"
+                                }`}
+                              >
+                                {item.kind === "bot"
+                                  ? item.chat.preview
+                                  : item.chat.preview ||
+                                    item.chat.members.map((member) => member.name).join(", ")}
+                              </div>
+                            )}
+                          </div>
+                        </button>
+                      ))}
                   </div>
-                </button>
-              ))
-            : null}
-          {archivedBots.length > 0 && !showWorkspaceSearch ? (
-            <div className="mt-2 border-t border-[#202023] pt-2">
+                );
+              })}
+            </>
+          )}
+          {archivedBots.length + archivedGroups.length > 0 && !showSpaceSearch ? (
+            <div className="mt-2 border-t border-border pt-2">
               <button
                 type="button"
                 aria-expanded={archivedOpen}
                 onClick={() => setArchivedOpen((open) => !open)}
-                className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-[13.5px] text-[#85858A] hover:bg-[#131315]"
+                className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-[13.5px] text-muted-foreground hover:bg-sidebar-accent"
               >
-                <span>Archived</span>
-                <span>{archivedBots.length}</span>
+                <span>
+                  <Trans>Archived</Trans>
+                </span>
+                <span>{archivedBots.length + archivedGroups.length}</span>
               </button>
-              {archivedOpen
-                ? archivedBots.map((bot) => (
+              {archivedOpen ? (
+                <>
+                  {archivedBots.map((bot) => (
                     <div key={bot.id} className="flex items-center gap-2 rounded-lg px-2.5 py-2">
-                      <BotAvatar color={bot.color} size={28} status={bot.status} />
+                      <BotAvatar
+                        color={bot.color}
+                        identity={bot.id}
+                        size={28}
+                        status={bot.status}
+                      />
                       <span
-                        className="min-w-0 flex-1 truncate text-[14px] text-[#A8A8AD]"
+                        className="min-w-0 flex-1 truncate text-[14px] text-foreground/75"
                         dir="auto"
                       >
                         {bot.name}
                       </span>
-                      <button
-                        type="button"
+                      <Button
+                        variant="ghost"
+                        size="xs"
                         onClick={() =>
                           void rpc.bots.restore({ botId: bot.id }).then(() => refreshBots(true))
                         }
-                        className="text-[12.5px] text-[#C9C9CE] hover:text-white"
                       >
-                        Restore
-                      </button>
-                      <button
-                        type="button"
-                        aria-label={`Delete ${bot.name}`}
+                        <Trans>Restore</Trans>
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        className="text-destructive hover:text-destructive"
+                        aria-label={t`Delete ${bot.name}`}
                         onClick={() => setDeleteTarget(bot)}
-                        className="text-[12.5px] text-[#FF5364]"
                       >
-                        Delete
-                      </button>
+                        <Trans>Delete</Trans>
+                      </Button>
                     </div>
-                  ))
-                : null}
+                  ))}
+                  {archivedGroups.map((group) => (
+                    <div key={group.id} className="flex items-center gap-2 rounded-lg px-2.5 py-2">
+                      <GroupAvatar members={group.members} size={28} />
+                      <span
+                        className="min-w-0 flex-1 truncate text-[14px] text-foreground/75"
+                        dir="auto"
+                      >
+                        {group.name}
+                      </span>
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        onClick={() =>
+                          void rpc.groups
+                            .restore({ groupId: group.id })
+                            .then(() => refreshBots(true))
+                        }
+                      >
+                        <Trans>Restore</Trans>
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        className="text-destructive hover:text-destructive"
+                        aria-label={t`Delete ${group.name}`}
+                        onClick={() => setDeleteGroupTarget(group)}
+                      >
+                        <Trans>Delete</Trans>
+                      </Button>
+                    </div>
+                  ))}
+                </>
+              ) : null}
             </div>
           ) : null}
         </div>
         <button
           type="button"
           onClick={() => setPluginsOpen(true)}
-          className="mx-3 mb-1 flex items-center gap-3 rounded-[11px] px-2.5 py-2 hover:bg-[#131315]"
+          className="mx-3 mb-1 flex items-center gap-3 rounded-[11px] px-2.5 py-2 hover:bg-sidebar-accent"
         >
-          <span className="grid h-[30px] w-[30px] place-items-center rounded-full bg-[#17171A] text-[#9A9AA0]">
+          <span className="grid h-[30px] w-[30px] place-items-center rounded-full bg-muted text-foreground/75">
             <Puzzle size={15} strokeWidth={1.7} />
           </span>
-          <span className="text-[14.5px] text-[#C9C9CE]">Integrations</span>
+          <span className="text-[14.5px] text-foreground/90">
+            <Trans>Integrations</Trans>
+          </span>
         </button>
-        <div className="relative">
-          {menuOpen ? (
-            <div className="absolute bottom-14 inset-x-3 rounded-2xl border border-[#2A2A2F] bg-[#1A1A1D] p-2 shadow-[0_22px_50px_rgba(0,0,0,.55)]">
-              <button
-                type="button"
-                aria-label="Settings"
-                onClick={() => {
-                  setMenuOpen(false);
-                  setAccountSettingsOpen(true);
-                }}
-                className="flex w-full items-center gap-3 rounded-[11px] px-3 py-2.5 hover:bg-[#232327]"
-              >
-                <span className="text-[#9A9AA0]">⚙</span>
-                <span className="flex-1 text-start text-[14.5px] text-[#ECECEE]">Settings</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setMenuOpen(false);
-                  setModelsOpen(true);
-                }}
-                className="flex w-full items-center gap-3 rounded-[11px] px-3 py-2.5 hover:bg-[#232327]"
-              >
-                <Cpu size={16} strokeWidth={1.7} className="text-[#9A9AA0]" />
-                <span className="flex-1 text-start text-[14.5px] text-[#ECECEE]">Models</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setMenuOpen(false);
-                  setMemorySettingsOpen(true);
-                }}
-                className="flex w-full items-center gap-3 rounded-[11px] px-3 py-2.5 hover:bg-[#232327]"
-              >
-                <span className="text-[#9A9AA0]">◇</span>
-                <span className="flex-1 text-start text-[14.5px] text-[#ECECEE]">Memory</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setMenuOpen(false);
-                  setVoiceOpen(true);
-                }}
-                className="flex w-full items-center gap-3 rounded-[11px] px-3 py-2.5 hover:bg-[#232327]"
-              >
-                <Volume2 size={16} strokeWidth={1.7} className="text-[#9A9AA0]" />
-                <span className="flex-1 text-start text-[14.5px] text-[#ECECEE]">Voice</span>
-              </button>
-              <button
-                type="button"
-                className="flex w-full items-center gap-3 rounded-[11px] px-3 py-2.5 hover:bg-[#232327]"
-                onClick={async () => {
-                  setUsage(await rpc.usage.summary());
-                }}
-              >
-                <Gauge size={16} strokeWidth={1.7} className="text-[#9A9AA0]" />
-                <span className="flex-1 text-start text-[14.5px] text-[#ECECEE]">Weekly usage</span>
-              </button>
-              {usage ? (
-                <p className="px-3 pb-2 text-[12.5px] text-[#85858A]">
-                  {usage.runs} runs · {usage.inputTokens + usage.outputTokens} tokens
-                </p>
-              ) : null}
-              <button
-                type="button"
-                onClick={() => void authClient.signOut().then(() => navigate("/"))}
-                className="flex w-full items-center gap-3 rounded-[11px] px-3 py-2.5 hover:bg-[#232327]"
-              >
-                <LogOut size={16} strokeWidth={1.7} className="text-[#9A9AA0]" />
-                <span className="text-[14.5px] text-[#ECECEE]">Log out</span>
-              </button>
-            </div>
-          ) : null}
-          <button
-            type="button"
+        <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+          <PopoverTrigger
             data-testid="user-menu-trigger"
-            onClick={() => setMenuOpen((v) => !v)}
             className="flex items-center gap-[11px] px-[18px] py-3.5"
           >
-            <span className="grid h-8 w-8 place-items-center rounded-full bg-[#232326] text-[12px] text-[#A8A8AD]">
+            <span className="grid h-8 w-8 place-items-center rounded-full bg-accent text-[12px] text-foreground/75">
               {initials}
             </span>
-            <span className="text-[14.5px] text-[#C9C9CE]">{userName}</span>
-          </button>
-        </div>
+            <span className="text-[14.5px] text-foreground/90">{userName}</span>
+          </PopoverTrigger>
+          {menuOpen ? (
+            <PopoverContent
+              side="top"
+              align="start"
+              className="w-[calc(316px-1.5rem)] max-w-[calc(100vw-3rem)] gap-0 p-1 data-closed:animate-none"
+            >
+              <Button
+                variant="ghost"
+                className="w-full justify-start font-normal"
+                aria-label={t`Settings`}
+                onClick={() => {
+                  setMenuOpen(false);
+                  openSettings("general");
+                }}
+              >
+                <Settings className="text-muted-foreground" strokeWidth={1.75} />
+                <Trans>Settings</Trans>
+              </Button>
+              <Button
+                variant="ghost"
+                className="w-full justify-start font-normal"
+                aria-label={t`Usage`}
+                onClick={() => {
+                  setMenuOpen(false);
+                  void rpc.usage
+                    .summary()
+                    .then(setUsage)
+                    .catch(() => undefined);
+                  openSettings("usage");
+                }}
+              >
+                <Gauge className="text-muted-foreground" strokeWidth={1.75} />
+                <Trans>Usage</Trans>
+              </Button>
+              <Button
+                variant="ghost"
+                className="w-full justify-start font-normal"
+                onClick={() =>
+                  void authClient.signOut().then(() => {
+                    clearSpaceSelection();
+                    navigate("/");
+                  })
+                }
+              >
+                <LogOut className="text-muted-foreground" strokeWidth={1.75} />
+                <Trans>Log out</Trans>
+              </Button>
+            </PopoverContent>
+          ) : null}
+        </Popover>
       </aside>
 
-      <main className="flex min-w-0 flex-1 flex-col bg-[#0D0D0E]">
-        <div className="flex items-center justify-between border-b border-[#141416] px-3 py-[17px] md:px-[22px]">
+      <button
+        type="button"
+        data-testid="bots-sidebar-edge"
+        aria-label={botsSidebarCollapsed ? t`Show bots` : t`Hide bots`}
+        aria-pressed={!botsSidebarCollapsed}
+        className={`absolute inset-y-0 z-50 hidden w-2 cursor-ew-resize touch-none border-0 bg-transparent p-0 md:block ${
+          botsSidebarCollapsed ? "start-0" : "start-[308px]"
+        }`}
+        onPointerDown={(event) => {
+          event.currentTarget.setPointerCapture(event.pointerId);
+          botsSidebarEdgeDragRef.current = {
+            startX: event.clientX,
+            mode: botsSidebarCollapsed ? "expand" : "collapse",
+          };
+        }}
+        onPointerMove={(event) => {
+          const drag = botsSidebarEdgeDragRef.current;
+          if (!drag) return;
+          const rtl =
+            typeof document !== "undefined" &&
+            document.documentElement.getAttribute("dir") === "rtl";
+          const delta = rtl ? drag.startX - event.clientX : event.clientX - drag.startX;
+          if (drag.mode === "expand" && delta >= BOTS_SIDEBAR_EDGE_DRAG_PX) {
+            botsSidebarEdgeDragRef.current = null;
+            setBotsSidebarCollapsedPref(false);
+          } else if (drag.mode === "collapse" && delta <= -BOTS_SIDEBAR_EDGE_DRAG_PX) {
+            botsSidebarEdgeDragRef.current = null;
+            setBotsSidebarCollapsedPref(true);
+          }
+        }}
+        onPointerUp={(event) => {
+          const drag = botsSidebarEdgeDragRef.current;
+          botsSidebarEdgeDragRef.current = null;
+          if (!drag) return;
+          if (Math.abs(event.clientX - drag.startX) < BOTS_SIDEBAR_EDGE_DRAG_PX) {
+            setBotsSidebarCollapsedPref(!botsSidebarCollapsed);
+          }
+        }}
+        onPointerCancel={() => {
+          botsSidebarEdgeDragRef.current = null;
+        }}
+      />
+
+      <main
+        aria-hidden={mobileSidebarOpen || undefined}
+        inert={mobileSidebarOpen}
+        className="flex min-w-0 flex-1 flex-col bg-background"
+      >
+        <div className="app-drag flex items-center justify-between border-b border-sidebar-border px-3 py-[17px] md:px-[22px]">
           <div className="flex min-w-0 items-center gap-2">
+            {/* Collapsed bots sidebar: this header is the leading edge for window chrome. */}
+            {botsSidebarCollapsed && desktopBridge() ? <WindowChrome /> : null}
             <button
               type="button"
-              aria-label="Open navigation"
+              aria-label={t`Open navigation`}
               onClick={() => setMobileSidebarOpen(true)}
-              className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-[#A8A8AD] hover:bg-[#1B1B1E] md:hidden"
+              className="app-no-drag grid h-8 w-8 shrink-0 place-items-center rounded-lg text-foreground/75 hover:bg-accent md:hidden"
             >
               <Menu size={19} strokeWidth={1.7} />
             </button>
+            {botsSidebarCollapsed ? (
+              <button
+                type="button"
+                data-testid="restore-bots-sidebar"
+                aria-label={t`Show bots`}
+                title={t`Show bots`}
+                onClick={() => setBotsSidebarCollapsedPref(false)}
+                className="app-no-drag hidden h-8 w-8 shrink-0 place-items-center rounded-lg text-foreground/75 hover:bg-accent md:grid"
+              >
+                <PanelLeftOpen size={19} strokeWidth={1.7} aria-hidden="true" />
+              </button>
+            ) : null}
             <button
               type="button"
               data-testid="bot-settings-trigger"
               onClick={() => setPanel(inGroup ? "group-settings" : "settings")}
-              className="flex min-w-0 items-center gap-3"
+              className="app-no-drag flex min-w-0 items-center gap-3"
             >
               {inGroup ? (
                 <GroupAvatar
@@ -1621,13 +3127,18 @@ export function ShellPage() {
                   size={26}
                 />
               ) : active ? (
-                <BotAvatar color={active.color} size={26} status={active.status} />
+                <BotAvatar
+                  color={active.color}
+                  identity={active.id}
+                  size={26}
+                  status={active.status}
+                />
               ) : null}
               <span className="min-w-0">
-                <span className="block truncate text-[16px] font-medium text-[#ECECEE]" dir="auto">
+                <span className="block truncate text-[16px] font-medium text-foreground" dir="auto">
                   {inGroup
-                    ? (activeGroup?.name ?? activeSnapshot?.groupName ?? "Group")
-                    : (active?.name ?? "Select a bot")}
+                    ? (activeGroup?.name ?? activeSnapshot?.groupName ?? t`Group`)
+                    : (active?.name ?? t`Select a bot`)}
                 </span>
               </span>
             </button>
@@ -1636,156 +3147,197 @@ export function ShellPage() {
             {!inGroup && active ? (
               <button
                 type="button"
-                title={voiceStatus?.ready ? "Call" : "Set up voice to call"}
-                aria-label="Call"
+                title={t`Agent computer`}
                 onClick={() => {
-                  if (!voiceStatus?.ready) {
-                    setVoiceOpen(true);
-                    return;
+                  const next = panel === "computer" ? null : "computer";
+                  setPanel(next);
+                  if (next === "computer" && active) {
+                    // Refresh run/computer so Take control isn't stuck on a stale busyBotName.
+                    void refreshThread(active.id).catch(() => undefined);
                   }
-                  setCallOpen(true);
                 }}
-                className="grid h-[30px] w-[34px] place-items-center rounded-[9px] hover:bg-[#1B1B1E]"
-                style={{ background: callOpen ? "#1B1B1E" : "transparent" }}
+                data-active={panel ? "" : undefined}
+                className="app-no-drag grid h-[30px] w-[34px] place-items-center rounded-[9px] hover:bg-accent data-active:bg-accent"
               >
-                <Phone size={16} strokeWidth={1.6} className="text-[#A8A8AD]" />
-              </button>
-            ) : null}
-            {!inGroup ? (
-              <button
-                type="button"
-                title="Agent computer"
-                onClick={() => setPanel((p) => (p === "computer" ? null : "computer"))}
-                className="grid h-[30px] w-[34px] place-items-center rounded-[9px] hover:bg-[#1B1B1E]"
-                style={{ background: panel ? "#1B1B1E" : "transparent" }}
-              >
-                <Monitor size={18} strokeWidth={1.6} className="text-[#A8A8AD]" />
+                <Monitor size={18} strokeWidth={1.6} className="text-foreground/75" />
               </button>
             ) : null}
           </div>
         </div>
-        <Transcript
-          scrollRef={messageScroll}
-          artifactTarget={transcriptArtifactTarget}
-          messages={activeSnapshot?.messages ?? []}
-          olderCursor={activeSnapshot?.olderCursor ?? null}
-          loadingOlder={loadingOlder}
-          answerableAskMessageId={answerableAskMessageId}
-          running={transcriptRunning}
-          onLoadOlder={loadOlder}
-          onOpenBot={openBot}
-          onAnswer={answerMessage}
-          onReply={setReplyTarget}
-          memberName={resolveTranscriptMemberName}
-          onRefresh={refreshActiveThread}
-          onBotChanged={refreshBots}
-          onAddRoutine={addSkillRoutine}
-          voiceReady={Boolean(voiceStatus?.ready)}
-          speakingMessageId={speakingMessageId}
-          onSpeak={speakMessage}
-        />
+        {!active && !activeGroup && initialBotsLoaded ? (
+          <div className="grid flex-1 place-items-center">
+            <Button onClick={() => setPanel("create")}>
+              <Plus size={16} aria-hidden="true" />
+              <Trans>Create new Bot</Trans>
+            </Button>
+          </div>
+        ) : (
+          <Transcript
+            key={activeSnapshot?.threadId}
+            scrollRef={messageScroll}
+            artifactTarget={transcriptArtifactTarget}
+            messages={transcriptMessages}
+            olderCursor={activeSnapshot?.olderCursor ?? null}
+            loadingOlder={loadingOlder}
+            answerableAskMessageId={answerableAskMessageId}
+            running={transcriptRunning}
+            workingBots={workingBots}
+            onLoadOlder={loadOlder}
+            onOpenBot={openBot}
+            onAnswer={answerMessage}
+            onReply={setReplyTarget}
+            onReact={reactToMessage}
+            onJumpToMessage={jumpToReplyMessage}
+            onOpenPeerMessages={(peer) => {
+              setPeerConversation(peer);
+            }}
+            memberName={resolveTranscriptMemberName}
+            peerBot={resolveTranscriptBot}
+            onRefresh={refreshActiveThread}
+            onBotChanged={refreshBots}
+            onAddRoutine={addSkillRoutine}
+            voiceReady={Boolean(voiceStatus?.ready)}
+            speakingMessageId={speakingMessageId}
+            onSpeak={speakMessage}
+          />
+        )}
         {recordingSkill ? (
-          <div className="px-6 pb-2 text-center text-[13px] text-[#E65707]">
-            Teaching in progress — stop teaching before sending a new message.
+          <div className="px-6 pb-2 text-center text-[13px] text-destructive">
+            <Trans>Teaching in progress. Stop teaching before sending a new message.</Trans>
           </div>
         ) : null}
-        <Composer
-          key={inGroup ? `group:${groupId}` : `bot:${active?.id}`}
-          activeName={inGroup ? (activeGroup?.name ?? activeSnapshot?.groupName) : active?.name}
-          running={composerRunning}
-          disabled={Boolean(recordingSkill)}
-          pendingAttachments={activePendingAttachments}
-          attachmentNotice={attachmentNotice}
-          sendError={sendError}
-          dictationError={dictationError}
-          sending={sending}
-          fileInputRef={fileInputRef}
-          onAttachmentPick={onAttachmentPick}
-          onRemoveAttachment={removeAttachment}
-          onSend={sendMessage}
-          onStop={stopRun}
-          replyTarget={activeReplyTarget}
-          onClearReply={() => setReplyTarget(null)}
-          mentionMembers={
-            inGroup
-              ? (activeSnapshot?.members ?? activeGroup?.members)?.map((member) => ({
-                  botId: member.botId,
-                  name: member.name,
-                }))
-              : undefined
-          }
-          dictating={dictating}
-          transcribe={Boolean(voiceStatus?.transcribe)}
-          onDictateStart={(onFinal) => {
-            void dictation.listen({
-              mode: "hold",
-              transcribe: Boolean(voiceStatus?.transcribe),
-              onFinal,
-            });
-          }}
-          onDictateStop={() => dictation.submitHold()}
-        />
+        {active || activeGroup ? (
+          <Composer
+            key={inGroup ? `group:${groupId}` : `bot:${active?.id}`}
+            activeName={inGroup ? (activeGroup?.name ?? activeSnapshot?.groupName) : active?.name}
+            running={composerRunning}
+            disabled={Boolean(recordingSkill)}
+            pendingAttachments={activePendingAttachments}
+            attachmentNotice={attachmentNotice}
+            sendError={sendError}
+            runError={displayedRunError}
+            runErrorId={displayedRunErrorId}
+            onRunErrorPresented={handleRunErrorPresented}
+            onDismissError={dismissComposerError}
+            sending={sending}
+            fileInputRef={fileInputRef}
+            onAttachmentPick={onAttachmentPick}
+            onRemoveAttachment={removeAttachment}
+            onSend={sendMessage}
+            onStop={stopRun}
+            onVoice={
+              !inGroup && active
+                ? () => {
+                    if (!voiceStatus?.ready) {
+                      openSettings("voice");
+                      return;
+                    }
+                    setCallOpen(true);
+                  }
+                : undefined
+            }
+            replyTarget={activeReplyTarget}
+            replyTargetName={replyTargetName}
+            onClearReply={() => setReplyTarget(null)}
+            mentionTargets={composerMentionTargets}
+            agentSkills={agentSkills}
+            onSlashOpen={refreshAgentSkills}
+            onSlashAction={(action) => {
+              if (action === "chat-settings") {
+                setPanel(inGroup ? "group-settings" : "settings");
+                return;
+              }
+              if (action === "settings-general") {
+                openSettings("general");
+                return;
+              }
+              if (action === "settings-usage") {
+                void rpc.usage
+                  .summary()
+                  .then(setUsage)
+                  .catch(() => undefined);
+                openSettings("usage");
+              }
+            }}
+          />
+        ) : null}
       </main>
 
       <aside
         data-testid="side-panel"
         data-panel={panel ?? "closed"}
-        className={`absolute inset-y-0 end-0 z-20 flex min-h-0 shrink-0 flex-col overflow-hidden bg-[#0A0A0B] transition-[width] duration-150 ease-out md:relative ${
-          panel && (active || activeGroup)
-            ? "w-full max-w-[384px] border-s border-[#141416] md:w-[384px] md:max-w-none"
+        className={`absolute inset-y-0 end-0 z-20 flex min-h-0 shrink-0 flex-col overflow-hidden bg-background transition-[width] duration-150 ease-out md:relative ${
+          panel && (active || activeGroup || panel === "create")
+            ? "w-full max-w-[384px] border-s border-sidebar-border md:w-[384px] md:max-w-none"
             : "pointer-events-none w-0"
         }`}
       >
-        {panel && (active || activeGroup) ? (
+        {panel && (active || activeGroup || panel === "create") ? (
           <div className="rk-scroll h-full w-full overflow-y-auto px-5 py-[17px] md:w-[384px]">
             {panel !== "routine" &&
             panel !== "create" &&
             panel !== "create-group" &&
             panel !== "group-settings" ? (
               <div className="mb-4 flex items-center justify-between">
-                <span className="text-[13.5px] text-[#85858A]">
-                  {panel === "settings"
-                    ? "Settings"
-                    : active
-                      ? (computer?.state ?? active.status)
-                      : "group"}
+                <span className="text-[13.5px] text-muted-foreground">
+                  {panel === "settings" ? (
+                    <Trans>Settings</Trans>
+                  ) : active ? (
+                    (computer?.state ?? active.status)
+                  ) : (
+                    <Trans>Group</Trans>
+                  )}
                 </span>
-                <div className="flex gap-3.5">
+                <div className="flex gap-1">
+                  {active &&
+                  panel === "computer" &&
+                  !computerOpen &&
+                  computerPanelNeedsMaintenance(computer?.state, booting) ? (
+                    <ComputerMaintenanceActions
+                      botId={active.id}
+                      computer={computer}
+                      onChanged={async () => {
+                        await refreshThread(active.id);
+                      }}
+                    />
+                  ) : null}
                   {active ? (
-                    <button
-                      type="button"
-                      aria-label={panel === "settings" ? "Show computer" : "Show settings"}
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label={panel === "settings" ? t`Show computer` : t`Show settings`}
                       onClick={() => setPanel(panel === "settings" ? "computer" : "settings")}
-                      className={
-                        panel === "settings"
-                          ? "text-[#ECECEE]"
-                          : "text-[#85858A] hover:text-[#ECECEE]"
-                      }
+                      className={panel === "settings" ? "text-foreground" : "text-muted-foreground"}
                     >
                       <Settings size={16} strokeWidth={1.7} />
-                    </button>
+                    </Button>
                   ) : null}
-                  <button type="button" aria-label="Close panel" onClick={() => setPanel(null)}>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label={t`Close panel`}
+                    onClick={() => setPanel(null)}
+                  >
                     <X size={16} strokeWidth={1.8} />
-                  </button>
+                  </Button>
                 </div>
               </div>
             ) : null}
             {panel === "computer" && active ? (
               <div>
-                <div className="relative aspect-[16/10] overflow-hidden rounded-[14px] bg-[#0E0E10]">
+                <div
+                  data-testid="computer-preview"
+                  className="group relative aspect-[16/10] overflow-hidden rounded-[14px] bg-background"
+                >
                   {computerOpen ? (
-                    <div className="grid h-full place-items-center text-sm text-[#6C6C70]">
-                      Open in full window
+                    <div className="grid h-full place-items-center text-sm text-muted-foreground/80">
+                      <Trans>Open in full window</Trans>
                     </div>
                   ) : computer?.kind === "desktop" ? (
-                    <div className="grid h-full place-items-center px-6 text-center text-sm text-[#6C6C70]">
-                      This bot runs on this computer, not a Linux desktop. Shell and files use your
-                      home folder.
-                    </div>
-                  ) : computer?.state === "running" && embeddedScreenUrl ? (
+                    <DesktopKindEmptyState className="grid h-full place-items-center px-6 text-center text-sm text-muted-foreground/80" />
+                  ) : computer?.state === "running" && embeddedScreenUrl && !computerScreenError ? (
                     <iframe
-                      title="Bot screen preview"
+                      title={t`Bot screen preview`}
                       src={embeddedScreenUrl}
                       sandbox={screenIframeSandbox(embeddedScreenUrl)}
                       className="h-full w-full border-0 bg-black"
@@ -1793,101 +3345,65 @@ export function ShellPage() {
                       style={{ pointerEvents: "none" }}
                     />
                   ) : (
-                    <div className="grid h-full place-items-center text-sm text-[#6C6C70]">
-                      {computerPlaceholder(
-                        computer?.state,
-                        booting,
-                        computerLabel(computer?.mode, active.name),
-                      )}
+                    <div className="grid h-full place-items-center px-6 text-center text-sm text-muted-foreground/80">
+                      {computerScreenError ??
+                        (computersAreUnavailable(bootstrapMe?.sandboxProvider) ? (
+                          <ComputersUnavailableHint />
+                        ) : (
+                          computerPlaceholder(
+                            computer?.state,
+                            booting,
+                            computerLabel(computer?.mode, active.name),
+                          )
+                        ))}
                     </div>
                   )}
-                  <button
-                    type="button"
-                    className="absolute inset-0 cursor-pointer"
-                    aria-label="Open computer"
-                    onClick={() => void openComputer()}
-                  />
-                </div>
-                <div className="mt-3 flex items-center justify-between">
-                  <span className="text-[13.5px] text-[#85858A]">
-                    {computer?.busyBotName
-                      ? `${computer.busyBotName} is using it`
-                      : hasControl
-                        ? "You have control"
-                        : computer?.state === "suspended"
-                          ? "Asleep"
-                          : computerLabel(computer?.mode, active.name)}
-                  </span>
-                  {hasControl ? (
-                    <ComputerReleaseActions
-                      takeoverRequested={computer?.takeoverRequested ?? false}
-                      onRelease={releaseComputer}
-                    />
-                  ) : (
-                    <Button
+                  {!computerScreenError ? (
+                    <button
                       type="button"
-                      variant="outline"
-                      size="sm"
+                      data-testid="computer-preview-open"
+                      className="absolute inset-0 flex cursor-pointer items-center justify-center bg-overlay/40 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+                      aria-label={t`Open`}
                       onClick={() => void openComputer()}
                     >
-                      Take control
-                    </Button>
-                  )}
+                      <span className="inline-flex items-center gap-2 rounded-full bg-overlay px-3.5 py-2 text-[14px] text-foreground shadow-md">
+                        <Maximize2 size={15} strokeWidth={1.9} aria-hidden />
+                        <Trans>Open</Trans>
+                      </span>
+                    </button>
+                  ) : null}
                 </div>
-                <div className="mt-[30px] mb-3 text-[14px] text-[#85858A]">Routines</div>
-                {activeRoutines.map((routine) => (
-                  <button
-                    key={routine.id}
-                    type="button"
-                    onClick={() => {
-                      setRoutineDraft({
-                        name: routine.name,
-                        prompt: routine.prompt,
-                        schedule: presetFromCron(routine.cron),
-                      });
-                      setEditingRoutine(routine);
-                      setPanel("routine");
-                    }}
-                    className="flex w-full items-center gap-3 rounded-[11px] px-2.5 py-2.5 hover:bg-[#121214]"
-                  >
-                    <span className="text-[#E65707]">◷</span>
-                    <span className="flex-1 text-start text-[14.5px] text-[#ECECEE]" dir="auto">
-                      {routine.name}
-                    </span>
-                    <span className="text-[13px] text-[#6C6C70]">{formatCron(routine.cron)}</span>
-                  </button>
-                ))}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setRoutineDraft({ name: "", prompt: "", schedule: defaultCronPreset() });
+                <p className="mt-2 truncate text-[13.5px] text-muted-foreground" dir="auto">
+                  {t`${active.name}'s screen`}
+                </p>
+                <RoutineListHeader
+                  onCreate={() => {
+                    setRoutineDraft(emptyRoutineDraft());
+                    setRoutineWebhookSecret(null);
                     setEditingRoutine(null);
+                    setRoutineError(null);
                     setPanel("routine");
                   }}
-                  className="mt-1 flex items-center gap-2.5 px-2.5 py-2.5 text-[14.5px] text-[#7A7A80]"
-                >
-                  + New routine
-                </button>
-                {active ? (
-                  <TeachComputerSection
-                    botId={active.id}
-                    computer={computer}
-                    skills={activeTaughtSkills}
-                    busy={teachBusy}
-                    onRefresh={refreshActiveThread}
-                    onOpenComputer={openComputer}
-                    onStopTeaching={stopTeaching}
-                    onAddRoutine={(skill) => {
-                      setRoutineDraft({
-                        name: skill.name || skill.goal.slice(0, 80),
-                        prompt: `Run taught skill: ${skill.name || skill.goal}\n${skill.playbook.steps.map((step, index) => `${index + 1}. ${step}`).join("\n")}`,
-                        schedule: defaultCronPreset(),
-                      });
-                      setEditingRoutine(null);
-                      setPanel("routine");
-                    }}
-                  />
-                ) : null}
+                />
+                {activeRoutines.map((routine) => {
+                  const routineRunning =
+                    snapshot?.run?.routineId === routine.id && isActive(snapshot.run.status);
+                  return (
+                    <RoutineListRow
+                      key={routine.id}
+                      routine={routine}
+                      running={routineRunning}
+                      onOpen={() => {
+                        setRoutineDraft(draftFromRoutine(routine));
+                        setRoutineWebhookSecret(null);
+                        setEditingRoutine(routine);
+                        setRoutineError(null);
+                        setPanel("routine");
+                      }}
+                      onStop={() => void stopRun()}
+                    />
+                  );
+                })}
               </div>
             ) : null}
             {panel === "create-group" ? (
@@ -1933,6 +3449,7 @@ export function ShellPage() {
                 key={active.id}
                 bot={active}
                 memoryProviderConfigured={memoryProviderConfig != null}
+                onSkillsChange={setAgentSkills}
                 onSave={async ({ computerMode, ...patch }) => {
                   if (computerMode !== active.computerMode) {
                     await rpc.bots.setComputer({
@@ -1955,214 +3472,300 @@ export function ShellPage() {
                   a.click();
                   URL.revokeObjectURL(url);
                 }}
-                onClear={() => setClearTarget(active)}
+                onClear={() => setClearTarget({ kind: "bot", chat: active })}
               />
             ) : null}
             {panel === "routine" && active ? (
-              <div>
-                <div className="mb-5 flex items-center justify-between">
-                  <button
-                    type="button"
-                    onClick={() => setPanel("computer")}
-                    className="text-[#9A9AA0]"
-                  >
-                    <ChevronLeft size={18} strokeWidth={1.8} />
-                  </button>
-                  <div className="text-[15.5px] font-medium text-[#F1F1F2]">Routine</div>
-                  <button type="button" onClick={() => setPanel(null)} className="text-[#6C6C70]">
-                    <X size={16} strokeWidth={1.8} />
-                  </button>
-                </div>
-                <label className="text-[14px] text-[#85858A]">
-                  Name
-                  <input
-                    value={routineDraft.name}
-                    onChange={(e) => setRoutineDraft((s) => ({ ...s, name: e.target.value }))}
-                    className="mt-2 w-full rounded-[11px] border border-[#26262A] bg-transparent px-3.5 py-3 text-[#ECECEE]"
-                  />
-                </label>
-                <label className="mt-5 block text-[14px] text-[#85858A]">
-                  Instruction
-                  <textarea
-                    value={routineDraft.prompt}
-                    onChange={(e) => setRoutineDraft((s) => ({ ...s, prompt: e.target.value }))}
-                    rows={4}
-                    className="mt-2 w-full rounded-[11px] border border-[#26262A] bg-transparent px-3.5 py-3 text-[#ECECEE]"
-                  />
-                </label>
-                <div className="mt-5 text-[14px] text-[#85858A]">
-                  When to run
-                  <Suspense fallback={null}>
-                    <RoutineSchedule
-                      value={routineDraft.schedule}
-                      onChange={(schedule) => setRoutineDraft((s) => ({ ...s, schedule }))}
-                    />
-                  </Suspense>
-                </div>
-                <div className="mt-5 flex items-center gap-3">
-                  <button
-                    type="button"
-                    disabled={savingRoutine || runningRoutine}
-                    onClick={async () => {
-                      if (routineSavePending.current) return;
-                      const targetBotId = active.id;
-                      const targetRoutine = editingRoutine;
-                      if (targetRoutine && targetRoutine.botId !== targetBotId) return;
-                      const saveRequest = ++routineSaveRequest.current;
-                      routineSavePending.current = true;
-                      setSavingRoutine(true);
-                      setRoutineError(null);
-                      try {
-                        if (targetRoutine) {
-                          await rpc.routines.update({
-                            routineId: targetRoutine.id,
-                            name: routineDraft.name || "Routine",
-                            prompt: routineDraft.prompt || "Check in.",
-                            cron: cronFromPreset(routineDraft.schedule),
-                          });
-                        } else {
-                          await rpc.routines.create({
-                            botId: targetBotId,
-                            name: routineDraft.name || "Routine",
-                            prompt: routineDraft.prompt || "Check in.",
-                            cron: cronFromPreset(routineDraft.schedule),
-                            timezone: "UTC",
-                            active: true,
-                            notify: true,
-                          });
-                        }
-                      } catch (error) {
-                        if (
-                          routineSaveRequest.current !== saveRequest ||
-                          activeBotId.current !== targetBotId
-                        ) {
+              <RoutineEditor
+                draft={routineDraft}
+                onChange={setRoutineDraft}
+                editing={editingRoutine}
+                timezone={editingRoutine?.timezone ?? localTimezone()}
+                webhook={{
+                  path:
+                    typeof window !== "undefined"
+                      ? `${window.location.origin}/api/v1/bots/${active.id}/webhook`
+                      : `/api/v1/bots/${active.id}/webhook`,
+                  secret: routineWebhookSecret,
+                  configured: active.webhookConfigured || Boolean(routineWebhookSecret),
+                }}
+                githubPath={
+                  typeof window !== "undefined"
+                    ? `${window.location.origin}/api/v1/bots/${active.id}/github`
+                    : `/api/v1/bots/${active.id}/github`
+                }
+                messageProviders={messagingProviders}
+                saving={savingRoutine}
+                running={runningRoutine}
+                error={routineError}
+                onBack={() => setPanel("computer")}
+                onClose={() => setPanel(null)}
+                onEnsureWebhook={async () => {
+                  await ensureWebhookSecret(active.id);
+                }}
+                onSave={async () => {
+                  if (routineSavePending.current) return;
+                  const targetBotId = active.id;
+                  const targetRoutine = editingRoutine;
+                  if (targetRoutine && targetRoutine.botId !== targetBotId) return;
+                  if (
+                    !routineDraft.schedules.length &&
+                    !routineDraft.webhookEnabled &&
+                    !routineDraft.githubEnabled &&
+                    !routineDraft.messageProvider
+                  ) {
+                    setRoutineError(t`Add a schedule, webhook, GitHub, or message trigger`);
+                    return;
+                  }
+                  const saveRequest = ++routineSaveRequest.current;
+                  routineSavePending.current = true;
+                  setSavingRoutine(true);
+                  setRoutineError(null);
+                  try {
+                    if (
+                      (routineDraft.webhookEnabled || routineDraft.githubEnabled) &&
+                      !active.webhookConfigured &&
+                      !routineWebhookSecret
+                    ) {
+                      await ensureWebhookSecret(targetBotId);
+                    }
+                    const crons = routineDraft.schedules.map(cronFromPreset);
+                    let saved: Routine;
+                    if (targetRoutine) {
+                      const armOneShot = routineNeedsOneShotArm(targetRoutine, crons);
+                      let runAt: string | undefined;
+                      if (armOneShot) {
+                        if (!routineDraft.runAtLocal) {
+                          setRoutineError(t`Add a run time for this one-shot.`);
                           return;
                         }
-                        setRoutineError(
-                          error instanceof Error ? error.message : "Could not save routine",
-                        );
-                        return;
-                      } finally {
-                        routineSavePending.current = false;
-                        setSavingRoutine(false);
+                        const parsed = new Date(routineDraft.runAtLocal);
+                        if (!Number.isFinite(parsed.getTime()) || parsed.getTime() <= Date.now()) {
+                          setRoutineError(t`Run time must be in the future.`);
+                          return;
+                        }
+                        runAt = parsed.toISOString();
                       }
-                      if (
-                        routineSaveRequest.current !== saveRequest ||
-                        activeBotId.current !== targetBotId
-                      ) {
-                        return;
-                      }
-                      await refreshThread(targetBotId).catch(() => undefined);
-                      if (
-                        routineSaveRequest.current === saveRequest &&
-                        activeBotId.current === targetBotId
-                      ) {
-                        setPanel("computer");
-                      }
-                    }}
-                    className="rounded-[11px] bg-[#F1F1EF] px-4 py-2 text-[#17171A] disabled:opacity-40"
-                  >
-                    {savingRoutine ? "Saving…" : "Save"}
-                  </button>
-                  {editingRoutine?.botId === active.id ? (
-                    <>
-                      <button
-                        type="button"
-                        disabled={savingRoutine || runningRoutine}
-                        onClick={async () => {
-                          if (routineRunPending.current) return;
-                          const targetBotId = active.id;
-                          const targetRoutine = editingRoutine;
-                          if (!targetRoutine) return;
-                          routineRunPending.current = true;
-                          setRunningRoutine(true);
-                          try {
-                            await rpc.routines.testRun({ routineId: targetRoutine.id });
-                            await refreshThread(targetBotId);
-                          } finally {
-                            routineRunPending.current = false;
-                            setRunningRoutine(false);
-                          }
-                        }}
-                        className="rounded-[11px] border border-[#26262A] px-4 py-2 text-[14px] text-[#ECECEE] disabled:opacity-40"
-                      >
-                        {runningRoutine ? "Running…" : "Run now"}
-                      </button>
-                      <button
-                        type="button"
-                        disabled={savingRoutine || runningRoutine}
-                        onClick={() => setDeleteRoutineTarget(editingRoutine)}
-                        className="rounded-[11px] px-4 py-2 text-[14px] text-[#FF5364] disabled:opacity-40"
-                      >
-                        Delete routine
-                      </button>
-                    </>
-                  ) : null}
-                </div>
-                {routineError ? (
-                  <p role="alert" className="mt-3 text-[13px] text-[#EF6461]">
-                    {routineError}
-                  </p>
-                ) : null}
-              </div>
+                      saved = await rpc.routines.update({
+                        routineId: targetRoutine.id,
+                        name: routineDraft.name || t`Routine`,
+                        prompt: routineDraft.prompt || t`Check in.`,
+                        crons,
+                        active: armOneShot ? true : routineDraft.active,
+                        webhookEnabled: routineDraft.webhookEnabled,
+                        githubEnabled: routineDraft.githubEnabled,
+                        messageProvider: routineDraft.messageProvider,
+                        ...(runAt ? { runAt } : {}),
+                      });
+                    } else {
+                      saved = await rpc.routines.create({
+                        botId: targetBotId,
+                        name: routineDraft.name || t`Routine`,
+                        prompt: routineDraft.prompt || t`Check in.`,
+                        crons,
+                        timezone: localTimezone(),
+                        active: routineDraft.active,
+                        notify: true,
+                        webhookEnabled: routineDraft.webhookEnabled,
+                        githubEnabled: routineDraft.githubEnabled,
+                        messageProvider: routineDraft.messageProvider,
+                      });
+                    }
+                    if (
+                      routineSaveRequest.current === saveRequest &&
+                      activeBotId.current === targetBotId
+                    ) {
+                      setEditingRoutine(saved);
+                      setRoutineDraft(draftFromRoutine(saved));
+                    }
+                  } catch (error) {
+                    if (
+                      routineSaveRequest.current !== saveRequest ||
+                      activeBotId.current !== targetBotId
+                    ) {
+                      return;
+                    }
+                    setRoutineError(
+                      error instanceof Error ? error.message : t`Could not save routine`,
+                    );
+                    return;
+                  } finally {
+                    routineSavePending.current = false;
+                    setSavingRoutine(false);
+                  }
+                  if (
+                    routineSaveRequest.current !== saveRequest ||
+                    activeBotId.current !== targetBotId
+                  ) {
+                    return;
+                  }
+                  await refreshThread(targetBotId).catch(() => undefined);
+                }}
+                onTestRun={async () => {
+                  if (routineRunPending.current) return;
+                  const targetBotId = active.id;
+                  const targetRoutine = editingRoutine;
+                  if (!targetRoutine) return;
+                  routineRunPending.current = true;
+                  setRunningRoutine(true);
+                  setRoutineError(null);
+                  try {
+                    await rpc.routines.testRun({ routineId: targetRoutine.id });
+                    await refreshThread(targetBotId);
+                  } catch (error) {
+                    if (activeBotId.current === targetBotId) {
+                      setRoutineError(
+                        error instanceof Error ? error.message : t`Could not run routine`,
+                      );
+                    }
+                  } finally {
+                    routineRunPending.current = false;
+                    setRunningRoutine(false);
+                  }
+                }}
+                onDelete={() => {
+                  if (editingRoutine) {
+                    setDeleteRoutineTarget(editingRoutine);
+                    return;
+                  }
+                  setPanel("computer");
+                }}
+              />
             ) : null}
           </div>
         ) : null}
       </aside>
 
       <Suspense fallback={null}>
-        {contextBot && botMenu ? (
+        {contextChat && botMenu ? (
           <BotContextMenu
-            bot={contextBot}
+            bot={contextChat}
             position={botMenu.position}
             onClose={closeBotMenu}
             sections={botSections}
             onTogglePinned={() => {
               setBotMenu(null);
-              void rpc.bots
-                .update({ botId: contextBot.id, pinned: !contextBot.pinned })
-                .then(() => refreshBots());
+              const request = contextBot
+                ? rpc.bots.update({ botId: contextBot.id, pinned: !contextBot.pinned })
+                : rpc.groups.update({
+                    groupId: contextGroup!.id,
+                    pinned: !contextGroup!.pinned,
+                  });
+              void request.then(() => refreshBots());
             }}
             onToggleUnread={() => {
-              const unread = !contextBot.unread;
+              const unread = !contextChat.unread;
               setBotMenu(null);
-              const request = unread ? markBotUnread(contextBot.id) : markBotRead(contextBot.id);
-              void request.catch(() => undefined);
+              if (contextBot) {
+                const request = unread ? markBotUnread(contextBot.id) : markBotRead(contextBot.id);
+                void request.catch(() => undefined);
+              } else {
+                const request = unread
+                  ? rpc.threads.markUnread({ groupId: contextGroup!.id })
+                  : rpc.threads.markRead({ groupId: contextGroup!.id });
+                void request
+                  .then(() =>
+                    setGroups((current) =>
+                      current.map((group) =>
+                        group.id === contextGroup!.id ? { ...group, unread } : group,
+                      ),
+                    ),
+                  )
+                  .catch(() => undefined);
+              }
             }}
             onMoveToSection={(sectionId) => {
               setBotMenu(null);
-              if (sectionId === contextBot.sectionId) return;
-              void rpc.bots.update({ botId: contextBot.id, sectionId }).then(() => refreshBots());
+              if (sectionId === contextChat.sectionId) return;
+              const request = contextBot
+                ? rpc.bots.update({ botId: contextBot.id, sectionId })
+                : rpc.groups.update({ groupId: contextGroup!.id, sectionId });
+              void request.then(() => refreshBots());
             }}
             onCreateSection={() => {
-              setNewSectionBot(contextBot);
+              setNewSectionTarget(
+                contextBot
+                  ? { kind: "bot", chat: contextBot }
+                  : { kind: "group", chat: contextGroup! },
+              );
               setBotMenu(null);
             }}
             onEdit={() => {
-              navigate(`/app/${contextBot.id}`);
-              setPanel("settings");
+              navigate(contextBot ? `/app/${contextBot.id}` : `/app/g/${contextGroup!.id}`);
+              setPanel(contextBot ? "settings" : "group-settings");
               setBotMenu(null);
             }}
             onDuplicate={() => {
               setBotMenu(null);
-              void rpc.bots.duplicate({ botId: contextBot.id }).then(async (bot) => {
+              const request = contextBot
+                ? rpc.bots.duplicate({ botId: contextBot.id })
+                : rpc.groups.duplicate({ groupId: contextGroup!.id });
+              void request.then(async (chat) => {
                 await refreshBots();
-                navigate(`/app/${bot.id}`);
+                navigate(contextBot ? `/app/${chat.id}` : `/app/g/${chat.id}`);
               });
             }}
             onClear={() => {
-              setClearTarget(contextBot);
+              setClearTarget(
+                contextBot
+                  ? { kind: "bot", chat: contextBot }
+                  : { kind: "group", chat: contextGroup! },
+              );
               setBotMenu(null);
             }}
             onArchive={() => {
               setBotMenu(null);
-              void rpc.bots.archive({ botId: contextBot.id }).then(() => refreshBots(true));
+              const request = contextBot
+                ? rpc.bots.archive({ botId: contextBot.id })
+                : rpc.groups.archive({ groupId: contextGroup!.id });
+              void request.then(() => refreshBots(true));
             }}
             onDelete={() => {
-              setDeleteTarget(contextBot);
+              if (contextBot) setDeleteTarget(contextBot);
+              else setDeleteGroupTarget(contextGroup!);
               setBotMenu(null);
             }}
           />
+        ) : null}
+
+        {spaceMenu ? (
+          <DropdownMenu
+            open
+            onOpenChange={(open) => {
+              if (!open) closeSpaceMenu();
+            }}
+          >
+            {/* Invisible anchor at the pointer position, mirroring the bot menu. */}
+            <DropdownMenuTrigger
+              render={
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  aria-hidden
+                  className="fixed size-0 p-0 opacity-0"
+                  style={{ left: spaceMenu.position.x, top: spaceMenu.position.y }}
+                />
+              }
+            />
+            <DropdownMenuContent
+              aria-label={t`Actions for space`}
+              align="start"
+              sideOffset={0}
+              className="w-[220px]"
+            >
+              <DropdownMenuItem
+                variant="destructive"
+                onClick={() => {
+                  const target = spaces.find((space) => space.id === spaceMenu.id);
+                  if (target) setDeleteSpaceTarget(target);
+                  setSpaceMenu(null);
+                }}
+              >
+                <Trash2 />
+                {t`Delete space`}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         ) : null}
 
         {deleteTarget ? (
@@ -2178,29 +3781,109 @@ export function ShellPage() {
           />
         ) : null}
 
-        {newSectionBot ? (
+        {deleteGroupTarget ? (
+          <DeleteItemDialog
+            item={deleteGroupTarget}
+            noun="group"
+            onCancel={() => setDeleteGroupTarget(null)}
+            onConfirm={async () => {
+              await rpc.groups.remove({ groupId: deleteGroupTarget.id });
+              setDeleteGroupTarget(null);
+              setPanel(null);
+              await refreshBots(true);
+            }}
+          />
+        ) : null}
+
+        {deleteSpaceTarget ? (
+          <DeleteItemDialog
+            item={deleteSpaceTarget}
+            noun="space"
+            description={
+              <Trans>Only empty spaces can be deleted. Delete its bots and groups first.</Trans>
+            }
+            onCancel={() => setDeleteSpaceTarget(null)}
+            onConfirm={async () => {
+              const targetId = deleteSpaceTarget.id;
+              const result = await rpc.spaces.remove({ spaceId: targetId });
+              setDeleteSpaceTarget(null);
+              setPanel(null);
+              const effectiveSpaceId = selectedSpaceId() ?? bootstrapMe?.spaceId;
+              if (effectiveSpaceId === targetId) {
+                // The auth boundary changed, so reload like a space switch.
+                if (selectSpace(result.activeSpaceId)) {
+                  window.location.assign("/app");
+                  return;
+                }
+              }
+              await refreshBots(true);
+            }}
+          />
+        ) : null}
+
+        {newSectionTarget ? (
           <NewBotSectionDialog
-            bot={newSectionBot}
-            onCancel={() => setNewSectionBot(null)}
+            bot={newSectionTarget.chat}
+            onCancel={() => setNewSectionTarget(null)}
             onConfirm={async (name) => {
-              await rpc.botSections.create({ botId: newSectionBot.id, name });
-              setNewSectionBot(null);
+              await rpc.botSections.create(
+                newSectionTarget.kind === "bot"
+                  ? { botId: newSectionTarget.chat.id, name }
+                  : { groupId: newSectionTarget.chat.id, name },
+              );
+              setNewSectionTarget(null);
               await refreshBots();
             }}
           />
         ) : null}
 
+        <CommandPalette
+          open={commandPaletteOpen}
+          onOpenChange={setCommandPaletteOpen}
+          bots={bots}
+          onSelectBot={(id) => {
+            setMobileSidebarOpen(false);
+            navigate(`/app/${id}`);
+          }}
+        />
+
+        {newSpaceOpen ? (
+          <NewSpaceDialog
+            onCancel={() => setNewSpaceOpen(false)}
+            onConfirm={async (name) => {
+              const space = await rpc.spaces.create({ name });
+              if (!selectSpace(space.id)) {
+                setNewSpaceOpen(false);
+                await refreshBots();
+                return;
+              }
+              window.location.assign("/onboarding");
+            }}
+          />
+        ) : null}
+
+        {pickerInfoTopic ? (
+          <PickerInfoDialog topic={pickerInfoTopic} onClose={() => setPickerInfoTopic(null)} />
+        ) : null}
+
         {clearTarget ? (
           <ClearConversationDialog
-            bot={clearTarget}
+            bot={clearTarget.chat}
             onCancel={() => setClearTarget(null)}
             onConfirm={async () => {
-              await rpc.threads.clear({ botId: clearTarget.id });
-              if (active?.id === clearTarget.id) {
+              await rpc.threads.clear(
+                clearTarget.kind === "bot"
+                  ? { botId: clearTarget.chat.id }
+                  : { groupId: clearTarget.chat.id },
+              );
+              if (
+                (clearTarget.kind === "bot" && active?.id === clearTarget.chat.id) ||
+                (clearTarget.kind === "group" && activeGroup?.id === clearTarget.chat.id)
+              ) {
                 expandedHistoryThread.current = null;
                 pinnedAroundRef.current = null;
                 historyEpoch.current += 1;
-                setSnapshot((current) =>
+                updateSnapshot((current) =>
                   current ? { ...current, messages: [], olderCursor: null, run: null } : current,
                 );
               }
@@ -2211,8 +3894,9 @@ export function ShellPage() {
         ) : null}
 
         {deleteRoutineTarget ? (
-          <DeleteRoutineDialog
-            routine={deleteRoutineTarget}
+          <DeleteItemDialog
+            item={deleteRoutineTarget}
+            noun="routine"
             onCancel={() => setDeleteRoutineTarget(null)}
             onConfirm={async () => {
               const target = deleteRoutineTarget;
@@ -2228,6 +3912,7 @@ export function ShellPage() {
 
         {pluginsOpen ? (
           <PluginsOverlay
+            activeBotId={activeBotId.current}
             onClose={() => setPluginsOpen(false)}
             onOpenMcp={() => {
               setPluginsOpen(false);
@@ -2236,26 +3921,62 @@ export function ShellPage() {
           />
         ) : null}
         {mcpOpen ? <McpServersOverlay onClose={() => setMcpOpen(false)} /> : null}
+        {messagingSettingsOpen ? (
+          <MessagingSettingsOverlay onClose={() => setMessagingSettingsOpen(false)} />
+        ) : null}
       </Suspense>
 
       <Suspense fallback={null}>
-        {accountSettingsOpen ? (
-          <AccountSettingsOverlay
+        {settingsOpen ? (
+          <SettingsOverlay
             name={userName}
             email={session.data?.user.email}
-            onClose={() => setAccountSettingsOpen(false)}
+            usage={usage}
+            initialSection={settingsSection}
+            avatarStyle={bootstrapMe?.avatarStyle ?? "robot"}
+            isDeploymentOwner={bootstrapMe?.isDeploymentOwner === true}
+            sandboxProvider={bootstrapMe?.sandboxProvider}
+            messagingEnabled={messagingSurfaceEnabled}
+            onOpenMessaging={() => {
+              setSettingsOpen(false);
+              setMessagingSettingsOpen(true);
+            }}
+            onAvatarStyleChange={async (avatarStyle) => {
+              const nextMe = await rpc.preferences.update({ avatarStyle });
+              setBootstrapMe(nextMe);
+            }}
+            memoryConfig={memoryProviderConfig}
+            onMemoryConfigChange={(config) => {
+              memoryProviderConfigRevision.current += 1;
+              setMemoryProviderConfig(config);
+            }}
+            onVoiceStatusMaybeChanged={async () => {
+              try {
+                setVoiceStatus(
+                  await Promise.race([rpc.voice.status(), voiceStatusRefreshTimeout()]),
+                );
+              } catch {
+                // Prefer reopening Voice settings over CallView with stale readiness.
+                setVoiceStatus(null);
+              }
+            }}
+            onClose={() => {
+              setSettingsOpen(false);
+              setSettingsSection("general");
+            }}
           />
         ) : null}
-        {modelsOpen ? <ModelSettingsOverlay onClose={() => setModelsOpen(false)} /> : null}
-        {voiceOpen ? (
-          <VoiceSettingsOverlay
-            onClose={() => {
-              setVoiceOpen(false);
-              void rpc.voice
-                .status()
-                .then(setVoiceStatus)
-                .catch(() => undefined);
-            }}
+        {peerConversation && active ? (
+          <PeerMessagesOverlay
+            botId={active.id}
+            botName={active.name}
+            botColor={active.color}
+            peerBotId={peerConversation.peerBotId}
+            peerBotName={peerConversation.peerBotName}
+            peerBotColor={
+              resolveTranscriptBot(peerConversation.peerBotId)?.color ?? FALLBACK_BOT_COLOR
+            }
+            onClose={() => setPeerConversation(null)}
           />
         ) : null}
         {callOpen && active ? (
@@ -2272,118 +3993,161 @@ export function ShellPage() {
         ) : null}
       </Suspense>
 
-      <Suspense fallback={null}>
-        {memorySettingsOpen ? (
-          <MemorySettingsOverlay
-            onClose={() => setMemorySettingsOpen(false)}
-            config={memoryProviderConfig}
-            onConfigChange={(config) => {
-              memoryProviderConfigRevision.current += 1;
-              setMemoryProviderConfig(config);
-            }}
-          />
-        ) : null}
-      </Suspense>
-
       {booting ? (
-        <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-[22px] bg-[rgba(4,4,5,.96)]">
-          <div className="text-[19px] font-medium text-[#F1F1F2]">
-            Booting up {active?.name}’s computer
+        <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-[22px] bg-background/95">
+          <div className="text-[19px] font-medium text-foreground">
+            <Trans>Booting up {active?.name}’s computer</Trans>
           </div>
-          <div className="h-[5px] w-[min(420px,70%)] overflow-hidden rounded-full bg-[#232327]">
-            <div className="h-full w-2/3 rounded-full bg-[#F1F1EF]" />
+          <div className="h-[5px] w-[min(420px,70%)] overflow-hidden rounded-full bg-accent">
+            <div className="h-full w-2/3 rounded-full bg-primary" />
           </div>
         </div>
       ) : computerOpen && active ? (
-        <div className="absolute inset-0 z-30 flex flex-col bg-[#050506]">
-          <div className="flex items-center justify-between gap-4 border-b border-[#171719] px-[18px] py-3.5">
-            <div className="flex min-w-0 flex-1 items-center gap-3">
-              <BotAvatar color={active.color} size={28} status={active.status} />
-              {recordingSkill ? (
-                <TeachRecordingChrome
-                  recording={recordingSkill}
-                  busy={teachBusy}
-                  onStop={stopTeaching}
-                  variant="overlay"
+        <div className="fixed inset-0 z-30 bg-background">
+          <div
+            data-testid="computer-viewport"
+            className="fixed inset-x-0 top-0 flex flex-col bg-background"
+            style={{
+              height: computerViewport ? `${computerViewport.height}px` : "100dvh",
+              top: computerViewport ? `${computerViewport.offsetTop}px` : undefined,
+            }}
+          >
+            <div
+              data-testid="computer-chrome"
+              className="flex items-center justify-between gap-4 border-b border-sidebar-border px-[18px] py-3.5"
+            >
+              <div className="flex min-w-0 flex-1 items-center gap-3">
+                <BotAvatar
+                  color={active.color}
+                  identity={active.id}
+                  size={28}
+                  status={active.status}
                 />
-              ) : (
-                <span className="truncate text-[15.5px] font-medium text-[#ECECEE]" dir="auto">
-                  {computerLabel(computer?.mode, active.name)}
-                </span>
-              )}
-              {!recordingSkill && hasControl ? (
-                <span className="rounded-full bg-[rgba(48,162,75,.14)] px-[11px] py-1 text-[13px] text-[#4ECB71]">
-                  You have control
-                </span>
-              ) : null}
-            </div>
-            <div className="flex items-center gap-3">
-              {recordingSkill ? (
-                <TeachStopButton busy={teachBusy} onStop={stopTeaching} />
-              ) : hasControl ? (
-                <ComputerReleaseActions
-                  takeoverRequested={computer?.takeoverRequested ?? false}
-                  onRelease={releaseComputer}
-                />
-              ) : (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => void bootComputer({ takeControl: true, overlay: false })}
-                >
-                  Take control
-                </Button>
-              )}
-              <button
-                type="button"
-                className="text-[16px] text-[#85858A] hover:text-[#ECECEE]"
-                aria-label="Close computer"
-                onClick={() => setComputerOpen(false)}
-              >
-                <X size={16} strokeWidth={1.8} />
-              </button>
-            </div>
-          </div>
-          <div className="relative min-h-0 flex-1 bg-[#0E0E10]">
-            {computer?.kind === "desktop" ? (
-              <div className="grid h-full place-items-center px-8 text-center text-sm text-[#6C6C70]">
-                This bot runs on this computer. There is no separate Linux desktop. Ask it to use
-                the shell; working directories under your home folder are allowed.
+                {recordingSkill ? (
+                  <TeachRecordingChrome
+                    recording={recordingSkill}
+                    busy={teachBusy}
+                    onStop={stopTeaching}
+                    variant="overlay"
+                  />
+                ) : (
+                  <span className="truncate text-[15.5px] font-medium text-foreground" dir="auto">
+                    {computerLabel(computer?.mode, active.name)}
+                  </span>
+                )}
+                {!recordingSkill && hasControl ? (
+                  computer?.takeoverRequested ? (
+                    <span className="rounded-full bg-warning/15 px-[11px] py-1 text-[13px] text-warning">
+                      <Trans>Needs you</Trans>
+                    </span>
+                  ) : (
+                    <span className="rounded-full bg-success/15 px-[11px] py-1 text-[13px] text-success">
+                      <Trans>You have control</Trans>
+                    </span>
+                  )
+                ) : null}
               </div>
-            ) : computer?.state === "running" && embeddedScreenUrl ? (
-              <>
-                <iframe
-                  title="Bot screen"
-                  src={embeddedScreenUrl}
-                  sandbox={screenIframeSandbox(embeddedScreenUrl)}
-                  className="h-full w-full border-0 bg-black"
-                  allow="clipboard-read; clipboard-write; fullscreen"
-                  style={{
-                    pointerEvents: recordingSkill || !hasControl ? "none" : "auto",
-                  }}
-                />
-                {active ? (
-                  <TeachCaptureOverlay
-                    botId={active.id}
-                    skill={recordingSkill}
-                    enabled={Boolean(recordingSkill)}
-                    screenWidth={computer?.screenWidth}
-                    screenHeight={computer?.screenHeight}
+              <div className="flex items-center gap-3">
+                {composerRunning ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    aria-label={t`Stop`}
+                    data-testid="computer-overlay-stop"
+                    onClick={() => void stopRun()}
+                    disabled={sending}
+                  >
+                    <Trans>Stop</Trans>
+                  </Button>
+                ) : null}
+                {recordingSkill ? (
+                  <TeachStopButton busy={teachBusy} onStop={stopTeaching} />
+                ) : hasControl ? (
+                  <ComputerReleaseActions
+                    takeoverRequested={Boolean(computer?.takeoverRequested)}
+                    onRelease={releaseComputer}
                   />
                 ) : null}
-              </>
-            ) : (
-              <div className="grid h-full place-items-center text-sm text-[#6C6C70]">
-                {computer?.state === "suspended"
-                  ? "Computer is asleep"
-                  : computerLabel(computer?.mode, active.name)}
+                {active && !recordingSkill ? (
+                  <TeachComputerOverlayControl
+                    key={active.id}
+                    botId={active.id}
+                    computer={computer}
+                    busy={teachBusy}
+                    onRefresh={refreshActiveTeaching}
+                  />
+                ) : null}
+                {active && !recordingSkill ? (
+                  <ComputerMaintenanceActions
+                    botId={active.id}
+                    computer={computer}
+                    onChanged={async () => {
+                      await refreshThread(active.id);
+                    }}
+                  />
+                ) : null}
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  className="text-muted-foreground"
+                  aria-label={t`Close computer`}
+                  onClick={() => setComputerOpen(false)}
+                >
+                  <X size={16} strokeWidth={1.8} />
+                </Button>
               </div>
-            )}
+            </div>
+            {sendError ? (
+              <div
+                role="alert"
+                className="border-b border-destructive/40 bg-destructive/10 px-[18px] py-2 text-[13px] text-destructive"
+              >
+                {sendError}
+              </div>
+            ) : null}
+            <div className="relative min-h-0 flex-1 bg-background">
+              {computer?.kind === "desktop" ? (
+                <DesktopKindEmptyState className="grid h-full place-items-center px-8 text-center text-sm text-muted-foreground/80" />
+              ) : computer?.state === "running" && embeddedScreenUrl && !computerScreenError ? (
+                <>
+                  <iframe
+                    title={t`Bot screen`}
+                    src={embeddedScreenUrl}
+                    sandbox={screenIframeSandbox(embeddedScreenUrl)}
+                    className="h-full w-full border-0 bg-black"
+                    allow="clipboard-read; clipboard-write; fullscreen"
+                    style={{
+                      pointerEvents: recordingSkill || !hasControl ? "none" : "auto",
+                    }}
+                  />
+                  {active ? (
+                    <TeachCaptureOverlay
+                      botId={active.id}
+                      skill={recordingSkill}
+                      enabled={Boolean(recordingSkill)}
+                      screenWidth={computer?.screenWidth}
+                      screenHeight={computer?.screenHeight}
+                    />
+                  ) : null}
+                </>
+              ) : (
+                <div className="grid h-full place-items-center text-sm text-muted-foreground/80">
+                  {computerScreenError ??
+                    (computer?.state === "suspended"
+                      ? t`Computer is asleep`
+                      : computerLabel(computer?.mode, active.name))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       ) : null}
     </div>
+  );
+
+  return (
+    <AvatarStyleProvider value={bootstrapMe?.avatarStyle ?? "robot"}>{shell}</AvatarStyleProvider>
   );
 }
 
@@ -2395,11 +4159,16 @@ const Transcript = memo(function Transcript({
   loadingOlder,
   answerableAskMessageId,
   running,
+  workingBots,
   onLoadOlder,
   onOpenBot,
   onAnswer,
   onReply,
+  onReact,
+  onJumpToMessage,
+  onOpenPeerMessages,
   memberName,
+  peerBot,
   onRefresh,
   onBotChanged,
   onAddRoutine,
@@ -2414,11 +4183,16 @@ const Transcript = memo(function Transcript({
   loadingOlder: boolean;
   answerableAskMessageId: string | null;
   running: boolean;
+  workingBots: GroupAvatarMember[];
   onLoadOlder: () => void | Promise<void>;
   onOpenBot: (botId: string) => void;
   onAnswer: (message: ThreadMessage, text: string) => Promise<void>;
   onReply: (message: ThreadMessage) => void;
+  onReact: (message: ThreadMessage, reaction: MessageReaction) => Promise<void>;
+  onJumpToMessage: (messageId: string) => void;
+  onOpenPeerMessages: (peer: { peerBotId: string; peerBotName: string }) => void;
   memberName?: (botId: string | undefined) => string | undefined;
+  peerBot: (botId: string) => { color: string; status?: string } | undefined;
   onRefresh: () => Promise<void>;
   onBotChanged: () => Promise<void>;
   onAddRoutine: (name: string, prompt: string) => void;
@@ -2426,71 +4200,271 @@ const Transcript = memo(function Transcript({
   speakingMessageId: string | null;
   onSpeak: (message: ThreadMessage) => void;
 }) {
+  const { t } = useLingui();
+  const [atEnd, setAtEnd] = useState(true);
+  const following = useRef(true);
+  const autoScrolling = useRef(false);
+  const lastScrollTop = useRef<number | null>(null);
+  const autoScrollTimer = useRef<number | undefined>(undefined);
+  const jumpButtonRef = useRef<HTMLButtonElement>(null);
   const messageById = useMemo(
     () => new Map(messages.map((message) => [message.id, message])),
     [messages],
   );
+  const reactionView = useMemo(() => projectMessageReactions(messages), [messages]);
+  const workingBotName = workingBots.length === 1 ? workingBots[0]?.name : undefined;
+  const workingLabel =
+    workingBotName != null && workingBotName !== ""
+      ? t`${workingBotName} is working`
+      : t`Bots are working`;
+  const snapToEnd = useCallback(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    following.current = true;
+    autoScrolling.current = false;
+    setAtEnd(true);
+    element.scrollTo({ top: element.scrollHeight, behavior: "auto" });
+  }, [scrollRef]);
+
+  const jumpToLatest = useCallback(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    following.current = true;
+    autoScrolling.current = !reducedMotion;
+    setAtEnd(true);
+    element.scrollTo({
+      top: element.scrollHeight,
+      behavior: reducedMotion ? "auto" : "smooth",
+    });
+    window.clearTimeout(autoScrollTimer.current);
+    // Fallback only: onScroll clears autoScrolling once near-end is reached.
+    autoScrollTimer.current = window.setTimeout(
+      () => {
+        autoScrolling.current = false;
+      },
+      reducedMotion ? 0 : 2_000,
+    );
+  }, [scrollRef]);
+
+  useLayoutEffect(() => {
+    if (following.current) snapToEnd();
+  }, [messages, running, snapToEnd]);
+
+  useLayoutEffect(() => {
+    const button = jumpButtonRef.current;
+    if (atEnd && button && document.activeElement === button) {
+      button.blur();
+    }
+  }, [atEnd]);
+
+  const loadOlder = useCallback(() => {
+    const wasFollowing = following.current;
+    // Prepend must not race the messages-driven snap-to-end follow path.
+    following.current = false;
+    autoScrolling.current = false;
+    const pending = onLoadOlder();
+    if (!pending) return;
+    return Promise.resolve(pending).catch((error) => {
+      const element = scrollRef.current;
+      if (wasFollowing && element && transcriptIsNearEnd(element)) {
+        following.current = true;
+        setAtEnd(true);
+      }
+      throw error;
+    });
+  }, [onLoadOlder, scrollRef]);
+
+  useEffect(
+    () => () => {
+      window.clearTimeout(autoScrollTimer.current);
+    },
+    [],
+  );
+
   return (
-    <div
-      ref={scrollRef}
-      data-testid="transcript"
-      className="rk-scroll flex flex-1 flex-col gap-[13px] overflow-y-auto px-4 py-5 md:px-7 md:py-6"
-    >
-      {olderCursor != null ? (
-        <button
-          type="button"
-          disabled={loadingOlder}
-          onClick={() => void onLoadOlder()}
-          className="self-center rounded-lg px-3 py-1.5 text-[13px] text-[#85858A] hover:bg-[#1A1A1D] hover:text-[#C9C9CE] disabled:opacity-50"
-        >
-          {loadingOlder ? "Loading…" : "Load earlier messages"}
-        </button>
-      ) : null}
-      {messages.map((message) => (
-        <div key={message.id} data-message-id={message.id} className="group/message relative">
+    <div className="relative flex min-h-0 flex-1">
+      <div
+        ref={scrollRef}
+        data-testid="transcript"
+        onPointerDown={(event) => {
+          lastScrollTop.current = event.currentTarget.scrollTop;
+          autoScrolling.current = false;
+          following.current = false;
+        }}
+        onTouchStart={(event) => {
+          lastScrollTop.current = event.currentTarget.scrollTop;
+          autoScrolling.current = false;
+          following.current = false;
+        }}
+        onWheel={(event) => {
+          if (event.deltaY < 0) {
+            lastScrollTop.current = event.currentTarget.scrollTop;
+            autoScrolling.current = false;
+            following.current = false;
+          }
+        }}
+        onScroll={(event) => {
+          const scrolledDown = transcriptMovedDown(
+            lastScrollTop.current,
+            event.currentTarget.scrollTop,
+          );
+          lastScrollTop.current = event.currentTarget.scrollTop;
+          const nearEnd = transcriptIsNearEnd(event.currentTarget);
+          setAtEnd(nearEnd);
+          if (nearEnd) {
+            if (scrolledDown) following.current = true;
+            if (autoScrolling.current) {
+              autoScrolling.current = false;
+              window.clearTimeout(autoScrollTimer.current);
+            }
+          } else if (!autoScrolling.current) {
+            following.current = false;
+          }
+        }}
+        className="rk-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-4 py-5 md:px-7 md:py-6"
+      >
+        {olderCursor != null ? (
           <button
             type="button"
-            aria-label="Reply"
-            onClick={() => onReply(message)}
-            className="absolute end-0 top-0 rounded px-2 py-1 text-[12px] text-[#85858A] opacity-0 group-hover/message:opacity-100 hover:text-[#ECECEE] focus:opacity-100"
+            disabled={loadingOlder}
+            onClick={() => void loadOlder()}
+            className="self-center rounded-lg px-3 py-1.5 text-[13px] text-muted-foreground hover:bg-muted hover:text-foreground/75 disabled:opacity-50"
           >
-            Reply
+            {loadingOlder ? t`Loading…` : t`Load earlier messages`}
           </button>
-          <MessageView
-            artifactTarget={artifactTarget}
-            message={message}
-            canAnswer={message.id === answerableAskMessageId}
-            onOpenBot={onOpenBot}
-            onAnswer={onAnswer}
-            speakerName={message.role === "bot" ? memberName?.(message.botId) : undefined}
-            memberName={memberName}
-            replyPreview={
-              message.replyToMessageId ? messageById.get(message.replyToMessageId) : undefined
-            }
-            onRefresh={onRefresh}
-            onBotChanged={onBotChanged}
-            onAddRoutine={onAddRoutine}
-            voiceReady={voiceReady}
-            speaking={speakingMessageId === message.id}
-            onSpeak={() => onSpeak(message)}
-          />
-        </div>
-      ))}
-      {running &&
-      !messages.some(
-        (message) =>
-          message.id.startsWith("progress:") &&
-          message.blocks[0]?.kind === "progress" &&
-          message.blocks[0].text,
-      ) ? (
-        <div className="flex justify-start">
-          {/* Box metrics match the progress bubble exactly so swapping between
-              them never changes height or text position. */}
-          <div className="flex max-w-[74%] items-center rounded-[20px] bg-[#1A1A1D] px-[18px] py-3 text-[15.5px] leading-[1.5]">
-            <LoadingState label="working" />
-          </div>
-        </div>
-      ) : null}
+        ) : null}
+        {reactionView.visibleMessages.map((message) => {
+          if (!message.blocks.some((block) => !isToolActivityBlock(block))) return null;
+          const peerReceipt = isPeerReceiptBlocks(message.blocks);
+          const messageReactions = reactionView.reactions.get(message.id);
+          return (
+            <div
+              key={message.id}
+              data-message-id={message.id}
+              className={peerReceipt ? "relative py-0.5" : "group/message relative hover:z-20"}
+            >
+              {!peerReceipt && !message.id.startsWith("progress:") ? (
+                <time
+                  dateTime={message.createdAt}
+                  data-testid="message-hover-time"
+                  className={cn(
+                    "pointer-events-none absolute top-1 z-10 text-xs tabular-nums text-muted-foreground opacity-0 transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100 group-has-[[aria-expanded=true]]/message:opacity-100",
+                    message.role === "user" ? "start-0" : "end-0",
+                  )}
+                >
+                  {new Date(message.createdAt).toLocaleTimeString(i18n.locale || "en", {
+                    hour: "numeric",
+                    minute: "2-digit",
+                  })}
+                </time>
+              ) : null}
+              <div
+                className={
+                  peerReceipt
+                    ? undefined
+                    : `relative flex ${message.role === "user" ? "justify-end" : "justify-start"}`
+                }
+              >
+                <div
+                  data-testid={peerReceipt ? undefined : "message-bubble-frame"}
+                  className={
+                    peerReceipt
+                      ? undefined
+                      : `relative w-fit min-w-0 ${
+                          message.role === "user"
+                            ? "max-w-[min(70%,calc(100%_-_6rem))]"
+                            : "max-w-[min(74%,calc(100%_-_6rem))]"
+                        }`
+                  }
+                >
+                  {peerReceipt ? null : (
+                    <MessageHoverActions
+                      message={message}
+                      side={message.role === "user" ? "start" : "end"}
+                      onReply={onReply}
+                      onReact={onReact}
+                    />
+                  )}
+                  <MessageView
+                    artifactTarget={artifactTarget}
+                    message={message}
+                    canAnswer={message.id === answerableAskMessageId}
+                    onOpenBot={onOpenBot}
+                    onOpenPeerMessages={onOpenPeerMessages}
+                    onAnswer={onAnswer}
+                    speakerName={
+                      peerReceipt
+                        ? undefined
+                        : message.role === "bot"
+                          ? memberName?.(message.botId)
+                          : undefined
+                    }
+                    memberName={memberName}
+                    peerBot={peerBot}
+                    replyPreview={
+                      message.replyToMessageId
+                        ? messageById.get(message.replyToMessageId)
+                        : undefined
+                    }
+                    replyToMessageId={message.replyToMessageId}
+                    onJumpToMessage={onJumpToMessage}
+                    onRefresh={onRefresh}
+                    onBotChanged={onBotChanged}
+                    onAddRoutine={onAddRoutine}
+                    voiceReady={voiceReady}
+                    speaking={speakingMessageId === message.id}
+                    onSpeak={() => onSpeak(message)}
+                  />
+                </div>
+              </div>
+              {!peerReceipt && messageReactions ? (
+                <div
+                  data-testid="message-reactions"
+                  className={cn(
+                    "mt-1 flex flex-wrap gap-1",
+                    message.role === "user" && "justify-end",
+                  )}
+                >
+                  {[...messageReactions].map(([emoji, count]) => (
+                    <span
+                      key={emoji}
+                      className="rounded-full border border-border bg-muted px-2 py-0.5 text-xs"
+                    >
+                      {emoji}
+                      {count > 1 ? ` ${count}` : ""}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+        {running &&
+        !messages.some(
+          (message) =>
+            message.id.startsWith("progress:") &&
+            message.blocks.some(
+              (block) =>
+                block.kind === "progress" && !isToolActivityBlock(block) && Boolean(block.text),
+            ),
+        ) ? (
+          <ActiveBotGlyph bots={workingBots} label={workingLabel} />
+        ) : null}
+      </div>
+      <button
+        ref={jumpButtonRef}
+        type="button"
+        aria-label={t`Jump to latest`}
+        aria-hidden={atEnd}
+        tabIndex={atEnd ? -1 : 0}
+        onClick={jumpToLatest}
+        className={`absolute bottom-4 left-1/2 z-20 grid h-9 w-9 -translate-x-1/2 place-items-center rounded-full border border-border bg-muted/95 text-foreground/75 shadow-md backdrop-blur transition-[opacity,transform,background-color] duration-200 ease-[cubic-bezier(.22,1,.36,1)] hover:bg-border motion-reduce:transition-none ${
+          atEnd ? "pointer-events-none translate-y-2 opacity-0" : "translate-y-0 opacity-100"
+        }`}
+      >
+        <ArrowDown size={17} strokeWidth={1.8} />
+      </button>
     </div>
   );
 });
@@ -2502,20 +4476,24 @@ const Composer = memo(function Composer({
   pendingAttachments,
   attachmentNotice,
   sendError,
-  dictationError,
+  runError,
+  runErrorId,
+  onRunErrorPresented,
+  onDismissError,
   sending,
   fileInputRef,
   onAttachmentPick,
   onRemoveAttachment,
   onSend,
   onStop,
+  onVoice,
   replyTarget,
+  replyTargetName,
   onClearReply,
-  mentionMembers,
-  dictating,
-  transcribe,
-  onDictateStart,
-  onDictateStop,
+  mentionTargets,
+  agentSkills,
+  onSlashOpen,
+  onSlashAction,
 }: {
   activeName?: string;
   running: boolean;
@@ -2523,96 +4501,330 @@ const Composer = memo(function Composer({
   pendingAttachments: PendingAttachment[];
   attachmentNotice: string | null;
   sendError: string | null;
-  dictationError: string | null;
+  runError: string | null;
+  runErrorId: string | null;
+  onRunErrorPresented: (runId: string) => void;
+  onDismissError: () => void;
   sending: boolean;
   fileInputRef: RefObject<HTMLInputElement | null>;
   onAttachmentPick: (files: FileList | null) => void | Promise<void>;
   onRemoveAttachment: (attachment: PendingAttachment) => void;
-  onSend: (text: string, mentions?: string[]) => Promise<void>;
+  onSend: (text: string, mentions?: ComposerMention[]) => Promise<void>;
   onStop: () => Promise<void>;
+  onVoice?: () => void;
   replyTarget?: ThreadMessage | null;
+  replyTargetName?: string;
   onClearReply?: () => void;
-  mentionMembers?: Array<{ botId: string; name: string }>;
-  dictating: boolean;
-  transcribe: boolean;
-  onDictateStart: (onFinal: (text: string) => void) => void;
-  onDictateStop: () => void;
+  mentionTargets?: ComposerMention[];
+  agentSkills?: AgentSkillCatalogEntry[];
+  onSlashOpen?: () => void;
+  onSlashAction?: (action: SlashActionId) => void;
 }) {
+  const { t } = useLingui();
   const [draft, setDraft] = useState("");
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
-  const [selectedMentions, setSelectedMentions] = useState<Array<{ botId: string; name: string }>>(
-    [],
-  );
-  const canSend = draft.trim().length > 0 || pendingAttachments.length > 0;
+  const [mentionHighlightIndex, setMentionHighlightIndex] = useState(0);
+  const [slashQuery, setSlashQuery] = useState<string | null>(null);
+  const [selectedSkill, setSelectedSkill] = useState<AgentSkillCatalogEntry | null>(null);
+  const [selectedMentions, setSelectedMentions] = useState<ComposerMention[]>([]);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const runErrorRef = useRef<HTMLDivElement>(null);
+  const presentedRunErrorIdRef = useRef<string | null>(null);
+  const mentionListboxId = useId();
+  const dragDepth = useRef(0);
+  const [draggingFiles, setDraggingFiles] = useState(false);
+  const canSend =
+    draft.trim().length > 0 ||
+    selectedSkill !== null ||
+    selectedMentions.length > 0 ||
+    pendingAttachments.length > 0;
+
+  useEffect(() => {
+    if (!runError || !runErrorId) return;
+    const currentRunErrorId = runErrorId;
+    let frame = 0;
+    function recordIfPresented() {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const element = runErrorRef.current;
+        if (!element || document.visibilityState !== "visible") return;
+        const rect = element.getBoundingClientRect();
+        const topElement = document.elementFromPoint(
+          rect.left + rect.width / 2,
+          rect.top + rect.height / 2,
+        );
+        if (topElement && (topElement === element || element.contains(topElement))) {
+          if (presentedRunErrorIdRef.current === currentRunErrorId) return;
+          presentedRunErrorIdRef.current = currentRunErrorId;
+          onRunErrorPresented(currentRunErrorId);
+        }
+      });
+    }
+    recordIfPresented();
+    const observer = new MutationObserver(recordIfPresented);
+    observer.observe(document.body, { childList: true, subtree: true });
+    document.addEventListener("transitionend", recordIfPresented);
+    document.addEventListener("visibilitychange", recordIfPresented);
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      document.removeEventListener("transitionend", recordIfPresented);
+      document.removeEventListener("visibilitychange", recordIfPresented);
+    };
+  }, [onRunErrorPresented, runError, runErrorId]);
+
+  useLayoutEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+
+    function syncHeight() {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.style.height = "0px";
+      textarea.style.height = `${textarea.scrollHeight}px`;
+    }
+
+    syncHeight();
+    let lastWidth = el.getBoundingClientRect().width;
+    const observer = new ResizeObserver(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      const width = textarea.getBoundingClientRect().width;
+      if (width === lastWidth) return;
+      lastWidth = width;
+      syncHeight();
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [draft]);
 
   function updateDraft(value: string) {
     setDraft(value);
-    setSelectedMentions((current) =>
-      current.filter((member) => hasMentionToken(value, member.name)),
-    );
-    const match = /(?:^|\s)@([\w-]*)$/.exec(value);
-    setMentionQuery(match ? (match[1] ?? "") : null);
+    const mentionMatch = /(?:^|\s)@([\w-]*)$/.exec(value);
+    setMentionQuery(mentionMatch ? (mentionMatch[1] ?? "") : null);
+    // `/` only at the start of the draft so forced skills expand (`Use skill:` / `/Name` prefix).
+    const slashMatch = selectedSkill === null ? /^\/([^\n]*)$/.exec(value) : null;
+    const nextSlash = slashMatch ? (slashMatch[1] ?? "") : null;
+    if (nextSlash !== null && slashQuery === null) onSlashOpen?.();
+    setSlashQuery(nextSlash);
   }
 
-  function insertMention(member: { botId: string; name: string }) {
-    setDraft((current) => current.replace(/@([\w-]*)$/, `@${member.name} `));
-    if (member.botId !== "everyone") {
-      setSelectedMentions((current) =>
-        current.some((selected) => selected.botId === member.botId)
-          ? current
-          : [...current, member],
-      );
-    }
+  function focusComposer() {
+    textareaRef.current?.focus();
+  }
+
+  function insertMention(mention: ComposerMention) {
+    setDraft((current) => current.replace(/@([\w-]*)$/, ""));
     setMentionQuery(null);
+    setMentionHighlightIndex(0);
+    setSelectedMentions((current) =>
+      current.some((selected) => mentionChipKey(selected) === mentionChipKey(mention))
+        ? current
+        : [...current, mention],
+    );
+    focusComposer();
+  }
+
+  function insertSkill(skill: AgentSkillCatalogEntry) {
+    setSelectedSkill(skill);
+    setDraft("");
+    setSlashQuery(null);
+  }
+
+  function runSlashAction(action: SlashActionId) {
+    setDraft("");
+    setSlashQuery(null);
+    onSlashAction?.(action);
+  }
+
+  function removeLastChip() {
+    if (selectedMentions.length > 0) {
+      setSelectedMentions((current) => current.slice(0, -1));
+      return;
+    }
+    if (selectedSkill) setSelectedSkill(null);
   }
 
   const mentionOptions = useMemo(() => {
-    if (mentionQuery === null || !mentionMembers?.length) return [];
-    const query = mentionQuery.toLowerCase();
-    const options = mentionMembers.filter((member) => member.name.toLowerCase().startsWith(query));
-    if ("everyone".startsWith(query)) {
-      options.unshift({ botId: "everyone", name: "everyone" });
-    }
-    return options.slice(0, 8);
-  }, [mentionMembers, mentionQuery]);
+    if (mentionQuery === null || !mentionTargets?.length) return [];
+    const query = mentionQuery.trim().toLowerCase();
+    return mentionTargets
+      .filter((target) => !query || target.name.toLowerCase().startsWith(query))
+      .slice(0, 10);
+  }, [mentionQuery, mentionTargets]);
+
+  useEffect(() => {
+    setMentionHighlightIndex(0);
+  }, [mentionQuery, mentionOptions]);
+
+  const activeMentionIndex = clampMentionHighlightIndex(
+    mentionHighlightIndex,
+    mentionOptions.length,
+  );
+  const mentionPickerOpen = mentionOptions.length > 0;
+  const activeMentionOptionId = mentionPickerOpen
+    ? `${mentionListboxId}-option-${activeMentionIndex}`
+    : undefined;
+
+  const slashSkillOptions = useMemo(() => {
+    if (slashQuery === null) return [];
+    const query = slashQuery.trim().toLowerCase();
+    const skills = agentSkills ?? [];
+    return skills
+      .filter((skill) => {
+        if (!query) return true;
+        return (
+          skill.name.toLowerCase().includes(query) ||
+          skill.description.toLowerCase().includes(query)
+        );
+      })
+      .slice(0, 8);
+  }, [agentSkills, slashQuery]);
+
+  const slashActionOptions = useMemo(() => {
+    if (slashQuery === null) return [];
+    const query = slashQuery.trim().toLowerCase();
+    return SLASH_ACTIONS.filter((action) => !query || action.label.toLowerCase().includes(query));
+  }, [slashQuery]);
+
+  const showSlashPicker =
+    slashQuery !== null &&
+    mentionQuery === null &&
+    (slashSkillOptions.length > 0 || slashActionOptions.length > 0);
 
   function send() {
     if (!canSend || sending || disabled) return;
-    const text = draft;
+    const text = serializeComposerPrompt(draft, selectedSkill, selectedMentions);
     setDraft("");
     setMentionQuery(null);
-    const mentions = selectedMentions.map((member) => member.botId);
+    setMentionHighlightIndex(0);
+    setSlashQuery(null);
+    setSelectedSkill(null);
+    const mentions = selectedMentions;
     setSelectedMentions([]);
     void onSend(text, mentions);
   }
 
+  function handleDragEnter(event: DragEvent<HTMLFieldSetElement>) {
+    const dataTransfer = event.dataTransfer;
+    if (!isFileDrag(dataTransfer)) return;
+    event.preventDefault();
+    if (disabled) {
+      dragDepth.current = 0;
+      setDraggingFiles(false);
+      return;
+    }
+    dragDepth.current += 1;
+    setDraggingFiles(true);
+  }
+
+  function handleDragOver(event: DragEvent<HTMLFieldSetElement>) {
+    const dataTransfer = event.dataTransfer;
+    if (!isFileDrag(dataTransfer)) return;
+    event.preventDefault();
+    dataTransfer.dropEffect = disabled ? "none" : "copy";
+    if (disabled) {
+      dragDepth.current = 0;
+      setDraggingFiles(false);
+      return;
+    }
+    setDraggingFiles(true);
+  }
+
+  function handleDragLeave(event: DragEvent<HTMLFieldSetElement>) {
+    if (!isFileDrag(event.dataTransfer)) return;
+    if (disabled) {
+      dragDepth.current = 0;
+      setDraggingFiles(false);
+      return;
+    }
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDraggingFiles(false);
+  }
+
+  function handleDrop(event: DragEvent<HTMLFieldSetElement>) {
+    const dataTransfer = event.dataTransfer;
+    if (!isFileDrag(dataTransfer)) return;
+    event.preventDefault();
+    dragDepth.current = 0;
+    setDraggingFiles(false);
+    if (!disabled) void onAttachmentPick(dataTransfer.files);
+  }
+
+  function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const clipboardData = event.clipboardData;
+    // Only intercept real FileList pastes; leave text-only / empty-files native.
+    if (disabled || !clipboardData || !isFilePaste(clipboardData)) return;
+    event.preventDefault();
+    void onAttachmentPick(clipboardData.files);
+    const text = clipboardData.getData("text/plain");
+    if (!text) return;
+    const textarea = event.currentTarget;
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    updateDraft(`${draft.slice(0, start)}${text}${draft.slice(end)}`);
+    const caret = start + text.length;
+    window.requestAnimationFrame(() => {
+      textareaRef.current?.setSelectionRange(caret, caret);
+    });
+  }
+
+  const showComposerPlaceholder =
+    draft.length === 0 && selectedSkill === null && selectedMentions.length === 0;
+  const replyName = replyTarget ? (replyTargetName ?? previewMessageText(replyTarget)) : "";
+
   return (
-    <div className="px-3 pb-4 pt-3 md:px-6 md:pb-6">
-      {sendError || dictationError ? (
-        <div className="mb-3 rounded-[14px] border border-[#5A2A2A] bg-[#2A1717] px-4 py-2 text-[13px] text-[#F1A8A8]">
-          {sendError ?? dictationError}
+    <fieldset
+      aria-label={t`Message composer`}
+      data-dragging={draggingFiles ? "files" : undefined}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      className={`relative z-30 m-0 min-w-0 border-0 px-3 pb-4 pt-3 md:px-6 md:pb-6 ${
+        draggingFiles ? "rounded-[14px] ring-2 ring-inset ring-ring" : ""
+      }`}
+    >
+      {sendError || runError ? (
+        <div
+          ref={runErrorRef}
+          role="alert"
+          data-testid="composer-error"
+          className="mb-3 flex items-center gap-2 rounded-[14px] border border-destructive/40 bg-destructive/10 px-4 py-2 text-[13px] text-destructive"
+        >
+          <span className="min-w-0 flex-1">{sendError ?? runError}</span>
+          <button
+            type="button"
+            aria-label={t`Dismiss error`}
+            data-testid="composer-error-dismiss"
+            onClick={() => {
+              onDismissError();
+              window.requestAnimationFrame(() => textareaRef.current?.focus());
+            }}
+            className="shrink-0 text-destructive hover:text-foreground"
+          >
+            <X size={13} strokeWidth={2} />
+          </button>
         </div>
       ) : null}
       {replyTarget ? (
-        <div className="mb-3 flex items-start justify-between gap-3 rounded-[14px] border border-[#26262A] bg-[#17171A] px-4 py-2 text-[13px] text-[#C9C9CE]">
-          <div className="min-w-0">
-            <div className="text-[#85858A]">Replying to</div>
-            <div dir="auto" className="truncate">
-              {previewMessageText(replyTarget)}
-            </div>
-          </div>
+        <div
+          data-testid="reply-chip"
+          className="mb-2 flex items-center gap-2 rounded-full border border-border bg-muted px-3 py-1.5 text-[13px] text-foreground/75"
+        >
+          <span className="min-w-0 flex-1 truncate text-muted-foreground">{t`Replying to ${replyName}`}</span>
           <button
             type="button"
-            aria-label="Cancel reply"
+            aria-label={t`Cancel reply`}
             onClick={onClearReply}
-            className="text-[#85858A]"
+            className="shrink-0 text-muted-foreground hover:text-foreground"
           >
-            ✕
+            <X size={13} strokeWidth={2} />
           </button>
         </div>
       ) : null}
       {attachmentNotice ? (
-        <div className="mb-3 rounded-[14px] border border-[#3A3A20] bg-[#232316] px-4 py-2 text-[13px] text-[#D6CFA0]">
+        <div className="mb-3 rounded-[14px] border border-warning/40 bg-warning/10 px-4 py-2 text-[13px] text-warning">
           {attachmentNotice}
         </div>
       ) : null}
@@ -2621,7 +4833,7 @@ const Composer = memo(function Composer({
           {pendingAttachments.map((attachment) => (
             <div
               key={attachment.id}
-              className="flex items-center gap-2 rounded-full border border-[#26262A] bg-[#17171A] px-3 py-1.5 text-[13px] text-[#C9C9CE]"
+              className="flex items-center gap-2 rounded-full border border-border bg-muted px-3 py-1.5 text-[13px] text-foreground/75"
             >
               {attachment.previewUrl ? (
                 <img
@@ -2637,9 +4849,9 @@ const Composer = memo(function Composer({
               </span>
               <button
                 type="button"
-                aria-label={`Remove ${attachment.file.name}`}
+                aria-label={t`Remove ${attachment.file.name}`}
                 onClick={() => onRemoveAttachment(attachment)}
-                className="text-[#85858A] hover:text-[#ECECEE]"
+                className="text-muted-foreground hover:text-foreground"
               >
                 <X size={13} strokeWidth={2} />
               </button>
@@ -2647,21 +4859,93 @@ const Composer = memo(function Composer({
           ))}
         </div>
       ) : null}
-      {mentionOptions.length ? (
-        <div className="mb-2 overflow-hidden rounded-[14px] border border-[#26262A] bg-[#17171A]">
-          {mentionOptions.map((member) => (
-            <button
-              key={member.botId}
-              type="button"
-              onClick={() => insertMention(member)}
-              className="block w-full px-4 py-2 text-start text-[14px] text-[#ECECEE] hover:bg-[#1F1F22]"
-            >
-              <span dir="auto">@{member.name}</span>
-            </button>
-          ))}
+      {mentionPickerOpen ? (
+        <div
+          id={mentionListboxId}
+          role="listbox"
+          aria-label={t`Mentions`}
+          data-testid="mention-picker"
+          className="mb-2 overflow-hidden rounded-[14px] border border-border bg-muted"
+        >
+          {mentionOptions.map((mention, index) => {
+            const optionId = `${mentionListboxId}-option-${index}`;
+            const highlighted = index === activeMentionIndex;
+            return (
+              <button
+                id={optionId}
+                key={mentionChipKey(mention)}
+                type="button"
+                role="option"
+                aria-selected={highlighted}
+                aria-label={t`@${mention.name}`}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => insertMention(mention)}
+                onMouseEnter={() => setMentionHighlightIndex(index)}
+                className={`flex w-full items-start gap-3 px-4 py-2.5 text-start hover:bg-accent ${
+                  highlighted ? "bg-accent" : ""
+                }`}
+              >
+                <MentionOptionIcon mention={mention} />
+                <span className="min-w-0">
+                  <span dir="auto" className="block text-[14px] text-foreground">
+                    @{mention.name}
+                  </span>
+                  {mention.subtitle ? (
+                    <span dir="auto" className="block truncate text-[12.5px] text-muted-foreground">
+                      {mention.subtitle}
+                    </span>
+                  ) : null}
+                </span>
+              </button>
+            );
+          })}
         </div>
       ) : null}
-      <div className="flex items-center gap-3.5 rounded-full border border-[#202023] bg-[#131315] py-[9px] pe-2.5 ps-3">
+      {showSlashPicker ? (
+        <div
+          data-testid="slash-picker"
+          className="mb-2 overflow-hidden rounded-[14px] border border-border bg-muted"
+        >
+          {slashSkillOptions.map((skill) => (
+            <button
+              key={skill.id}
+              type="button"
+              aria-label={t`Skill ${skill.name}`}
+              onClick={() => insertSkill(skill)}
+              className="flex w-full items-start gap-3 px-4 py-2.5 text-start hover:bg-accent"
+            >
+              <Box size={16} strokeWidth={1.7} className="mt-0.5 shrink-0 text-muted-foreground" />
+              <span className="min-w-0">
+                <span dir="auto" className="block text-[14px] text-foreground">
+                  {skill.name}
+                </span>
+                <span dir="auto" className="block truncate text-[12.5px] text-muted-foreground">
+                  {truncateSlashDescription(skill.description)}
+                </span>
+              </span>
+            </button>
+          ))}
+          {slashActionOptions.map((action) => {
+            const label = slashActionLabel(action.id);
+            return (
+              <button
+                key={action.id}
+                type="button"
+                aria-label={label}
+                onClick={() => runSlashAction(action.id)}
+                className="flex w-full items-center gap-3 px-4 py-2.5 text-start hover:bg-accent"
+              >
+                <Settings size={16} strokeWidth={1.7} className="shrink-0 text-muted-foreground" />
+                <span className="text-[14px] text-foreground">{label}</span>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+      <div
+        data-testid="composer-bar"
+        className="flex items-center gap-3.5 rounded-full border border-border bg-background py-[9px] pe-2.5 ps-3"
+      >
         <input
           ref={fileInputRef}
           type="file"
@@ -2670,93 +4954,344 @@ const Composer = memo(function Composer({
           className="hidden"
           onChange={(event) => void onAttachmentPick(event.target.files)}
         />
-        <button
-          type="button"
-          aria-label="Attach file"
+        <Button
+          variant="outline"
+          size="icon"
+          aria-label={t`Attach file`}
           disabled={disabled}
           onClick={() => fileInputRef.current?.click()}
-          className="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-full border border-[#26262A] text-[#9A9AA0] disabled:opacity-40"
+          className="rounded-full text-foreground/75"
         >
           <Plus size={17} strokeWidth={1.8} />
-        </button>
-        <button
-          type="button"
-          aria-label={dictating ? "Stop dictation" : "Dictate"}
-          onMouseDown={(event) => {
-            event.preventDefault();
-            onDictateStart((text) => setDraft((current) => `${current} ${text}`.trim()));
-          }}
-          onMouseUp={onDictateStop}
-          onMouseLeave={() => {
-            if (dictating) onDictateStop();
-          }}
-          onTouchStart={(event) => {
-            event.preventDefault();
-            onDictateStart((text) => setDraft((current) => `${current} ${text}`.trim()));
-          }}
-          onTouchEnd={onDictateStop}
-          className={`grid h-[34px] w-[34px] shrink-0 place-items-center rounded-full border ${
-            dictating
-              ? "border-[#4ECB71] bg-[rgba(48,162,75,.16)] text-[#4ECB71]"
-              : "border-[#26262A] text-[#9A9AA0]"
-          }`}
-          title={transcribe ? "Hold to talk" : "Hold to talk (on-device dictation)"}
-        >
-          <Mic size={16} strokeWidth={1.8} />
-        </button>
-        <input
-          value={draft}
-          onChange={(event) => updateDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              send();
+        </Button>
+        <div className="flex min-w-0 flex-1 flex-wrap items-end gap-1.5">
+          {selectedSkill ? (
+            <span
+              data-testid="skill-chip"
+              className="inline-flex max-w-full items-center gap-1.5 rounded-full bg-accent px-2.5 py-1 text-[13px] text-foreground"
+            >
+              <Box size={13} strokeWidth={1.7} className="shrink-0 text-muted-foreground/70" />
+              <span dir="auto" className="truncate">
+                {selectedSkill.name}
+              </span>
+              <button
+                type="button"
+                aria-label={t`Remove skill ${selectedSkill.name}`}
+                onClick={() => setSelectedSkill(null)}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                <X size={12} strokeWidth={2} />
+              </button>
+            </span>
+          ) : null}
+          {selectedMentions.map((mention) => (
+            <span
+              key={mentionChipKey(mention)}
+              data-testid="mention-chip"
+              data-mention-kind={mention.kind}
+              className="inline-flex max-w-full items-center gap-1.5 rounded-full bg-accent px-2.5 py-1 text-[13px] text-foreground"
+            >
+              <MentionChipIcon mention={mention} />
+              <span dir="auto" className="truncate">
+                {mention.name}
+              </span>
+              <button
+                type="button"
+                aria-label={t`Remove mention ${mention.name}`}
+                onClick={() =>
+                  setSelectedMentions((current) =>
+                    current.filter(
+                      (selected) => mentionChipKey(selected) !== mentionChipKey(mention),
+                    ),
+                  )
+                }
+                className="text-muted-foreground hover:text-foreground"
+              >
+                <X size={12} strokeWidth={2} />
+              </button>
+            </span>
+          ))}
+          <textarea
+            ref={textareaRef}
+            value={draft}
+            onChange={(event) => updateDraft(event.target.value)}
+            onPaste={handlePaste}
+            onKeyDown={(event) => {
+              if (
+                event.key === "Backspace" &&
+                draft.length === 0 &&
+                (selectedSkill !== null || selectedMentions.length > 0)
+              ) {
+                event.preventDefault();
+                removeLastChip();
+                return;
+              }
+              const action = resolveMentionPickerKey({
+                key: event.key,
+                shiftKey: event.shiftKey,
+                isComposing: event.nativeEvent.isComposing || event.keyCode === 229,
+                optionCount: mentionOptions.length,
+                highlightedIndex: activeMentionIndex,
+              });
+              if (action.type === "complete") {
+                const mention = mentionOptions[action.index];
+                if (!mention) return;
+                event.preventDefault();
+                insertMention(mention);
+                return;
+              }
+              if (action.type === "move") {
+                event.preventDefault();
+                setMentionHighlightIndex(action.index);
+                return;
+              }
+              if (action.type === "dismiss") {
+                event.preventDefault();
+                setMentionQuery(null);
+                setMentionHighlightIndex(0);
+                return;
+              }
+              if (action.type === "send") {
+                event.preventDefault();
+                send();
+              }
+            }}
+            disabled={disabled}
+            placeholder={
+              showComposerPlaceholder
+                ? activeName
+                  ? t`Message ${activeName}`
+                  : t`Message…`
+                : undefined
             }
-          }}
-          disabled={disabled}
-          placeholder={activeName ? `Message ${activeName}` : "Message…"}
-          aria-label={activeName ? `Message ${activeName}` : "Message"}
-          name="chat-message"
-          autoComplete="off"
-          dir="auto"
-          className="flex-1 bg-transparent text-[15.5px] text-[#E9E9EA] outline-none disabled:opacity-40"
-        />
-        {running ? (
-          <button
-            type="button"
-            aria-label="Stop"
-            onClick={() => void onStop()}
-            className="grid h-9 w-9 place-items-center rounded-full bg-[#F1F1EF] text-[#17171A]"
+            aria-label={activeName ? t`Message ${activeName}` : t`Message`}
+            role="combobox"
+            aria-autocomplete="list"
+            aria-haspopup="listbox"
+            aria-expanded={mentionPickerOpen}
+            aria-controls={mentionPickerOpen ? mentionListboxId : undefined}
+            aria-activedescendant={activeMentionOptionId}
+            name="chat-message"
+            autoComplete="off"
+            dir="auto"
+            rows={1}
+            className="max-h-32 min-h-[24px] min-w-[8rem] flex-1 resize-none overflow-y-auto bg-transparent py-0.5 text-[15.5px] leading-6 text-foreground outline-none placeholder:text-muted-foreground disabled:opacity-40"
+          />
+        </div>
+        {onVoice ? (
+          <Button
+            variant="outline"
+            size="icon"
+            aria-label={t`Voice`}
+            title={t`Voice`}
+            disabled={disabled}
+            onClick={onVoice}
+            className="rounded-full text-foreground/75"
           >
-            <Square size={12} strokeWidth={0} fill="currentColor" />
-          </button>
+            <Mic size={16} strokeWidth={1.8} />
+          </Button>
+        ) : null}
+        {running ? (
+          <>
+            <Button
+              size="icon"
+              aria-label={t`Send`}
+              disabled={sending || !canSend || disabled}
+              onClick={send}
+              className="size-10 rounded-full"
+            >
+              <ArrowUp size={18} strokeWidth={2} />
+            </Button>
+            <Button
+              variant="outline"
+              size="icon"
+              aria-label={t`Stop`}
+              disabled={sending}
+              onClick={() => void onStop()}
+              className="size-10 rounded-full text-foreground/75"
+            >
+              <Square size={12} strokeWidth={0} fill="currentColor" />
+            </Button>
+          </>
         ) : (
-          <button
-            type="button"
-            aria-label="Send"
+          <Button
+            size="icon"
+            aria-label={t`Send`}
             disabled={sending || !canSend || disabled}
             onClick={send}
-            className="grid h-9 w-9 place-items-center rounded-full bg-[#F1F1EF] text-[#17171A] disabled:opacity-50"
+            className="size-9 rounded-full"
           >
             <ArrowUp size={18} strokeWidth={2} />
-          </button>
+          </Button>
         )}
       </div>
-    </div>
+    </fieldset>
   );
 });
 
+function slashActionLabel(id: SlashActionId) {
+  switch (id) {
+    case "chat-settings":
+      return t`Chat Settings`;
+    case "settings-general":
+      return t`Settings: General`;
+    case "settings-usage":
+      return t`Settings: Usage`;
+  }
+}
+
+function MentionOptionIcon({ mention }: { mention: ComposerMention }) {
+  if (mention.kind === "routine") {
+    return <Clock size={16} strokeWidth={1.7} className="mt-0.5 shrink-0 text-muted-foreground" />;
+  }
+  if (mention.kind === "connector") {
+    return <Puzzle size={16} strokeWidth={1.7} className="mt-0.5 shrink-0 text-muted-foreground" />;
+  }
+  if (mention.kind === "group") {
+    return (
+      <span className="mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded-full bg-accent text-[9px] text-foreground/75">
+        G
+      </span>
+    );
+  }
+  if (mention.kind === "everyone") {
+    return (
+      <span className="mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded-full bg-accent text-[9px] text-foreground/75">
+        @
+      </span>
+    );
+  }
+  return <BotAvatar color={mention.color ?? FALLBACK_BOT_COLOR} identity={mention.id} size={16} />;
+}
+
+function MentionChipIcon({ mention }: { mention: ComposerMention }) {
+  if (mention.kind === "routine") {
+    return <Clock size={13} strokeWidth={1.7} className="shrink-0 text-muted-foreground/70" />;
+  }
+  if (mention.kind === "connector") {
+    return <Puzzle size={13} strokeWidth={1.7} className="shrink-0 text-muted-foreground/70" />;
+  }
+  if (mention.kind === "group" || mention.kind === "everyone") {
+    return (
+      <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-accent text-[9px] text-foreground/75">
+        {mention.kind === "group" ? "G" : "@"}
+      </span>
+    );
+  }
+  return <BotAvatar color={mention.color ?? FALLBACK_BOT_COLOR} identity={mention.id} size={16} />;
+}
+
 function previewMessageText(message: ThreadMessage): string {
   const text = message.blocks
-    .map((block) => (block.kind === "text" ? block.text : ""))
+    .map((block) => (block.kind === "text" || block.kind === "channel_message" ? block.text : ""))
     .filter(Boolean)
     .join(" ")
     .trim();
   if (text) return text;
   if (message.blocks.some((block) => block.kind === "image" || block.kind === "file")) {
-    return "Attachment";
+    return t`Attachment`;
   }
-  return "Message";
+  return t`Message`;
+}
+
+function MessageHoverActions({
+  message,
+  side,
+  onReply,
+  onReact,
+}: {
+  message: ThreadMessage;
+  side: "start" | "end";
+  onReply: (message: ThreadMessage) => void;
+  onReact: (message: ThreadMessage, reaction: MessageReaction) => Promise<void>;
+}) {
+  const { t } = useLingui();
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [reactionsOpen, setReactionsOpen] = useState(false);
+
+  // Streaming progress bubbles keep hover free for selection / stop clicks.
+  if (message.id.startsWith("progress:")) return null;
+
+  function copyMessage() {
+    const text = copyableMessageText(message);
+    if (!text || !navigator.clipboard) return;
+    void navigator.clipboard.writeText(text).catch(() => undefined);
+  }
+
+  const iconButtonClass =
+    "grid h-7 w-7 place-items-center text-muted-foreground transition-colors hover:text-foreground";
+
+  return (
+    <MessageHoverMetadata pinned={moreOpen || reactionsOpen} side={side}>
+      <div data-testid="message-hover-actions" className="flex items-center gap-0.5">
+        {canReactToThreadMessage(message) ? (
+          <Popover open={reactionsOpen} onOpenChange={setReactionsOpen}>
+            <PopoverTrigger
+              aria-label={t`React`}
+              className={cn(
+                iconButtonClass,
+                "h-11 w-11 [@media(hover:hover)_and_(pointer:fine)]:h-7 [@media(hover:hover)_and_(pointer:fine)]:w-7",
+              )}
+            >
+              <Smile size={15} strokeWidth={1.7} />
+            </PopoverTrigger>
+            <PopoverContent
+              align={side === "end" ? "start" : "end"}
+              className="w-auto flex-row gap-0 rounded-2xl p-1.5"
+              aria-label={t`Reactions`}
+            >
+              {MESSAGE_REACTIONS.map((emoji) => (
+                <button
+                  key={emoji}
+                  type="button"
+                  aria-label={emoji}
+                  className="grid h-11 w-11 place-items-center rounded-xl text-2xl hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
+                  onClick={() => {
+                    setReactionsOpen(false);
+                    void onReact(message, emoji);
+                  }}
+                >
+                  {emoji}
+                </button>
+              ))}
+            </PopoverContent>
+          </Popover>
+        ) : null}
+        <button
+          type="button"
+          aria-label={t`Reply`}
+          onClick={() => onReply(message)}
+          className={`${iconButtonClass} hidden [@media(hover:hover)_and_(pointer:fine)]:grid`}
+        >
+          <Reply size={15} strokeWidth={1.7} />
+        </button>
+        <DropdownMenu open={moreOpen} onOpenChange={setMoreOpen}>
+          <DropdownMenuTrigger
+            aria-label={t`More`}
+            className={cn(
+              iconButtonClass,
+              "h-11 w-11 [@media(hover:hover)_and_(pointer:fine)]:h-7 [@media(hover:hover)_and_(pointer:fine)]:w-7",
+            )}
+          >
+            <MoreHorizontal size={15} strokeWidth={1.7} />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align={side === "end" ? "start" : "end"}>
+            <DropdownMenuItem
+              className="[@media(hover:hover)_and_(pointer:fine)]:hidden"
+              onClick={() => onReply(message)}
+            >
+              <Reply size={15} />
+              <Trans>Reply</Trans>
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={copyMessage}>
+              <Copy size={14} strokeWidth={1.7} />
+              <Trans>Copy</Trans>
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    </MessageHoverMetadata>
+  );
 }
 
 function firstThreadRoute(
@@ -2770,14 +5305,18 @@ function firstThreadRoute(
 
 function applyThreadEvent(
   event: ProductEvent,
-  setSnapshot: Dispatch<SetStateAction<ThreadSnapshot | null>>,
-  setComputer: Dispatch<SetStateAction<ComputerStatus | null>>,
+  commitSnapshot: (next: ThreadSnapshot | null) => void,
+  commitComputer: (next: ComputerStatus | null) => void,
+  snapshotRef: MutableRefObject<ThreadSnapshot | null>,
+  computerRef: MutableRefObject<ComputerStatus | null>,
 ) {
   if (isThreadSnapshotEvent(event)) {
-    setSnapshot((prev) => reduceThreadSnapshot(prev, event));
+    const next = reduceThreadSnapshot(snapshotRef.current, event);
+    commitSnapshot(next);
   }
   if (isComputerStatusEvent(event)) {
-    setComputer((prev) => reduceComputerStatus(prev, event));
+    const next = reduceComputerStatus(computerRef.current, event);
+    commitComputer(next);
   }
 }
 
@@ -2791,54 +5330,18 @@ function ComputerReleaseActions({
   if (!takeoverRequested) {
     return (
       <Button type="button" variant="outline" size="sm" onClick={() => void onRelease()}>
-        Release
+        <Trans>Release</Trans>
       </Button>
     );
   }
   return (
     <div className="flex items-center gap-2">
       <Button type="button" variant="outline" size="sm" onClick={() => void onRelease("skipped")}>
-        Skip
+        <Trans>Skip</Trans>
       </Button>
       <Button type="button" size="sm" onClick={() => void onRelease("done")}>
-        I’m done
+        <Trans>I’m done</Trans>
       </Button>
-    </div>
-  );
-}
-
-function ToolSteps({
-  steps,
-  currentIndex,
-}: {
-  steps: Extract<ThreadMessage["blocks"][number], { kind: "steps" }>["steps"];
-  currentIndex?: number;
-}) {
-  return (
-    <div className="space-y-1.5">
-      {steps.map((step, index) => {
-        const isCurrent = index === currentIndex;
-        return (
-          <div key={index} className="flex items-center gap-2">
-            <span
-              className="text-[13px]"
-              style={{
-                color: isCurrent ? "#F5A03C" : "#4ECB71",
-                animation: isCurrent ? "rkPulse 1.2s ease-in-out infinite" : undefined,
-              }}
-            >
-              {isCurrent ? "◷" : "✓"}
-            </span>
-            <span
-              className="truncate text-[14px]"
-              style={{ color: isCurrent ? "#DFDFE2" : "#85858A" }}
-            >
-              {step.label}
-              {step.count > 1 ? ` ×${step.count}` : ""}
-            </span>
-          </div>
-        );
-      })}
     </div>
   );
 }
@@ -2849,9 +5352,13 @@ const MessageView = memo(function MessageView({
   message,
   onAnswer,
   onOpenBot,
+  onOpenPeerMessages,
   speakerName,
   memberName,
+  peerBot,
   replyPreview,
+  replyToMessageId,
+  onJumpToMessage,
   onRefresh,
   onBotChanged,
   onAddRoutine,
@@ -2864,9 +5371,13 @@ const MessageView = memo(function MessageView({
   message: ThreadMessage;
   onAnswer: (message: ThreadMessage, text: string) => Promise<void>;
   onOpenBot: (botId: string) => void;
+  onOpenPeerMessages: (peer: { peerBotId: string; peerBotName: string }) => void;
   speakerName?: string;
   memberName?: (botId: string | undefined) => string | undefined;
+  peerBot: (botId: string) => { color: string; status?: string } | undefined;
   replyPreview?: ThreadMessage;
+  replyToMessageId?: string;
+  onJumpToMessage?: (messageId: string) => void;
   onRefresh: () => Promise<void>;
   onBotChanged: () => Promise<void>;
   onAddRoutine: (name: string, prompt: string) => void;
@@ -2874,6 +5385,7 @@ const MessageView = memo(function MessageView({
   speaking: boolean;
   onSpeak: () => void;
 }) {
+  const { t } = useLingui();
   const isNarration =
     message.role === "bot" &&
     message.blocks.length > 0 &&
@@ -2881,44 +5393,41 @@ const MessageView = memo(function MessageView({
       (block) => block.kind === "text" || block.kind === "progress" || block.kind === "steps",
     );
   const isLive = message.id.startsWith("progress:");
+  const visibleNarrationBlocks = message.blocks.filter((block) => !isToolActivityBlock(block));
+  const parentJumpId = replyPreview?.id ?? replyToMessageId;
   const messageContext = (
     <>
       {speakerName ? (
-        <div className="mb-1 text-[12.5px] font-medium text-[#85858A]" dir="auto">
+        <div className="mb-1 text-[12.5px] font-medium text-muted-foreground" dir="auto">
           {speakerName}
         </div>
       ) : null}
-      {replyPreview ? (
-        <div
-          className="mb-2 max-w-[74%] rounded-[14px] border border-[#26262A] bg-[#131315] px-3 py-2 text-[12.5px] text-[#85858A]"
+      {parentJumpId ? (
+        <button
+          type="button"
+          data-testid="reply-parent-preview"
+          aria-label={t`Jump to replied message`}
+          onClick={() => onJumpToMessage?.(parentJumpId)}
+          className="mb-2 block max-w-[74%] truncate rounded-[14px] border border-border bg-background px-3 py-2 text-start text-[12.5px] text-muted-foreground hover:border-border hover:text-foreground/75"
           dir="auto"
         >
-          {previewMessageText(replyPreview)}
-        </div>
+          {replyPreview ? previewMessageText(replyPreview) : t`Earlier message`}
+        </button>
       ) : null}
     </>
   );
   if (isNarration) {
+    if (visibleNarrationBlocks.length === 0) return null;
     return (
       <>
         {messageContext}
-        <div className="flex justify-start">
+        <div className="flex w-fit max-w-full justify-start">
           <div
-            className="max-w-[74%] space-y-2.5 rounded-[20px] bg-[#1A1A1D] px-[18px] py-3 text-[15.5px] leading-[1.5] text-[#DFDFE2]"
+            data-testid="message-bot-bubble"
+            className="max-w-full space-y-2.5 rounded-[20px] bg-muted px-[18px] py-3 text-[15.5px] leading-[1.5] text-foreground/90"
             dir="auto"
           >
-            {message.blocks.map((block, i) => {
-              if (block.kind === "steps") {
-                const isCurrentBlock = isLive && i === message.blocks.length - 1;
-                return (
-                  <div key={i} dir="ltr">
-                    <ToolSteps
-                      steps={block.steps}
-                      currentIndex={isCurrentBlock ? block.steps.length - 1 : undefined}
-                    />
-                  </div>
-                );
-              }
+            {visibleNarrationBlocks.map((block, i) => {
               if (block.kind === "text" || block.kind === "progress") {
                 return (
                   <div key={i}>
@@ -2931,11 +5440,11 @@ const MessageView = memo(function MessageView({
             {!isLive && voiceReady && message.blocks.some((block) => block.kind === "text") ? (
               <button
                 type="button"
-                aria-label={speaking ? "Stop speaking" : "Speak this reply"}
+                aria-label={speaking ? t`Stop speaking` : t`Speak this reply`}
                 onClick={onSpeak}
-                className="text-[12px] text-[#85858A] hover:text-[#ECECEE]"
+                className="text-[12px] text-muted-foreground hover:text-foreground"
               >
-                {speaking ? "Stop" : "Speak"}
+                {speaking ? <Trans>Stop</Trans> : <Trans>Speak</Trans>}
               </button>
             ) : null}
           </div>
@@ -2947,13 +5456,14 @@ const MessageView = memo(function MessageView({
     <>
       {messageContext}
       {message.blocks.map((block, i) => {
+        if (isToolActivityBlock(block)) return null;
         if (block.kind === "handoff") {
-          const from = memberName?.(block.fromBotId) ?? "bot";
-          const to = memberName?.(block.toBotId) ?? "bot";
+          const from = memberName?.(block.fromBotId) ?? t`bot`;
+          const to = memberName?.(block.toBotId) ?? t`bot`;
           return (
             <div
               key={i}
-              className="flex items-center justify-center gap-2 py-1 text-[13.5px] text-[#85858A]"
+              className="flex items-center justify-center gap-2 py-1 text-[13.5px] text-muted-foreground"
             >
               <span>
                 ↪ {to} ← {from}
@@ -2962,40 +5472,55 @@ const MessageView = memo(function MessageView({
             </div>
           );
         }
+        if (block.kind === "bot_message_sent" || block.kind === "bot_message_received") {
+          const sent = block.kind === "bot_message_sent";
+          const peer = sent ? block.toBotName : block.fromBotName;
+          const peerBotId = sent ? block.toBotId : block.fromBotId;
+          const label = sent ? t`Messaged ${peer}` : t`Message from ${peer}`;
+          return (
+            <CollaborationMarker
+              key={i}
+              ariaLabel={label}
+              color={peerBot(peerBotId)?.color ?? FALLBACK_BOT_COLOR}
+              identity={peerBotId}
+              label={label}
+              onClick={() => onOpenPeerMessages({ peerBotId, peerBotName: peer })}
+            />
+          );
+        }
+        if (block.kind === "channel_message") {
+          return (
+            <div
+              key={i}
+              className="flex items-center justify-center gap-2 py-1 text-[13.5px] text-muted-foreground"
+            >
+              <span>
+                {messageProviderLabel(block.provider, block.transport)} · {block.fromLabel}:{" "}
+                {block.text}
+              </span>
+            </div>
+          );
+        }
         if (block.kind === "meta") {
           return (
             <div
               key={i}
-              className="flex items-center justify-center gap-2 py-1 text-[13.5px] text-[#85858A]"
+              className="flex items-center justify-center gap-2 py-1 text-[13.5px] text-muted-foreground"
             >
-              <span className="text-[#E65707]">◷</span>
+              <span className="text-warning">◷</span>
               <span>{block.text}</span>
             </div>
           );
         }
         if (block.kind === "progress") {
           return (
-            <div key={i} className="flex justify-start">
+            <div key={i} className="flex w-fit max-w-full justify-start">
               <div
-                className="max-w-[74%] rounded-[20px] bg-[#1A1A1D] px-[18px] py-3 text-[15.5px] leading-[1.5] text-[#DFDFE2]"
+                data-testid="message-bot-bubble"
+                className="max-w-full rounded-[20px] bg-muted px-[18px] py-3 text-[15.5px] leading-[1.5] text-foreground/90"
                 dir="auto"
               >
                 <ChatMarkdown streaming>{block.text}</ChatMarkdown>
-              </div>
-            </div>
-          );
-        }
-        if (block.kind === "steps") {
-          return (
-            <div key={i} className="flex justify-start">
-              <div
-                className="max-w-[74%] space-y-1.5 rounded-[20px] bg-[#1A1A1D] px-[18px] py-3"
-                dir="ltr"
-              >
-                <ToolSteps
-                  steps={block.steps}
-                  currentIndex={isLive ? block.steps.length - 1 : undefined}
-                />
               </div>
             </div>
           );
@@ -3006,30 +5531,30 @@ const MessageView = memo(function MessageView({
           return (
             <div
               key={i}
-              className="w-[min(420px,90%)] rounded-[18px] border border-[#232326] bg-[#17171A] px-[18px] py-4"
+              className="w-[min(420px,90%)] rounded-[18px] border border-border bg-muted px-[18px] py-4"
             >
               <div className="flex items-center justify-between gap-3">
-                <span className="text-[15px] font-medium text-[#ECECEE]" dir="auto">
+                <span className="text-[15px] font-medium text-foreground" dir="auto">
                   {block.name}
                 </span>
                 <span
-                  className="rounded-full px-[11px] py-1 text-[13px]"
-                  style={{
-                    background: failed
-                      ? "rgba(230,87,7,.14)"
+                  className={`rounded-full px-[11px] py-1 text-[13px] ${
+                    failed
+                      ? "bg-destructive/15 text-destructive"
                       : running
-                        ? "rgba(245,160,60,.14)"
-                        : "rgba(48,162,75,.14)",
-                    color: failed ? "#E65707" : running ? "#F5A03C" : "#4ECB71",
+                        ? "bg-warning/15 text-warning"
+                        : "bg-success/15 text-success"
+                  }`}
+                  style={{
                     animation: running ? "rkPulse 1.2s ease-in-out infinite" : undefined,
                   }}
                 >
-                  {running ? "subagent" : block.status}
+                  {running ? <Trans>subagent</Trans> : block.status}
                 </span>
               </div>
-              <div className="mt-2 text-[13.5px] text-[#85858A]">{block.task}</div>
+              <div className="mt-2 text-[13.5px] text-muted-foreground">{block.task}</div>
               {block.progress || block.result ? (
-                <div className="mt-2.5 text-[14.5px] leading-[1.5] text-[#A8A8AD]">
+                <div className="mt-2.5 text-[14.5px] leading-[1.5] text-foreground/75">
                   <ChatMarkdown streaming={running}>
                     {block.result || block.progress || ""}
                   </ChatMarkdown>
@@ -3046,32 +5571,32 @@ const MessageView = memo(function MessageView({
               type="button"
               disabled={removed}
               onClick={() => onOpenBot(block.botId)}
-              className="w-[min(340px,90%)] rounded-[18px] border border-[#232326] bg-[#17171A] px-[18px] py-4 text-start disabled:opacity-60"
+              className="w-[min(340px,90%)] rounded-[18px] border border-border bg-muted px-[18px] py-4 text-start disabled:opacity-60"
             >
               <div className="flex items-center justify-between">
-                <span className="text-[15px] font-medium text-[#ECECEE]" dir="auto">
+                <span className="text-[15px] font-medium text-foreground" dir="auto">
                   {block.name}
                 </span>
                 <span
-                  className="rounded-full px-[11px] py-1 text-[13px]"
-                  style={{
-                    background: removed ? "rgba(230,87,7,.14)" : "rgba(48,162,75,.14)",
-                    color: removed ? "#E65707" : "#4ECB71",
-                  }}
+                  className={`rounded-full px-[11px] py-1 text-[13px] ${
+                    removed ? "bg-destructive/15 text-destructive" : "bg-success/15 text-success"
+                  }`}
                 >
-                  {block.status === "archived"
-                    ? "archived"
-                    : block.status === "deleted"
-                      ? "deleted"
-                      : "bot"}
+                  {block.status === "archived" ? (
+                    <Trans>archived</Trans>
+                  ) : block.status === "deleted" ? (
+                    <Trans>deleted</Trans>
+                  ) : (
+                    <Trans>bot</Trans>
+                  )}
                 </span>
               </div>
-              <div className="mt-2 text-[14.5px] leading-[1.5] text-[#A8A8AD]" dir="auto">
+              <div className="mt-2 text-[14.5px] leading-[1.5] text-foreground/75" dir="auto">
                 {removed
                   ? block.status === "archived"
-                    ? "Archived. Chat, memory, and files kept."
-                    : "Removed with chat, computer, and memory."
-                  : block.title || "Opened its thread."}
+                    ? t`Archived. Chat, memory, and files kept.`
+                    : t`Removed with chat, computer, and memory.`
+                  : block.title || t`Opened its thread.`}
               </div>
             </button>
           );
@@ -3085,7 +5610,7 @@ const MessageView = memo(function MessageView({
           const botId = "botId" in artifactTarget ? artifactTarget.botId : message.botId;
           if (!botId) return null;
           return (
-            <div key={i} className="flex justify-start">
+            <div key={i} className="flex justify-start py-1">
               <AppConnectCard botId={botId} block={block} />
             </div>
           );
@@ -3143,9 +5668,10 @@ const MessageView = memo(function MessageView({
         }
         if (block.kind === "text" && message.role === "user") {
           return (
-            <div key={i} className="flex justify-end">
+            <div key={i} className="flex w-fit max-w-full justify-end">
               <div
-                className="max-w-[70%] rounded-[20px] bg-[#F1F1EF] px-[18px] py-3 text-[15.5px] leading-[1.45] text-[#1A1A1A]"
+                data-testid="message-user-bubble"
+                className="max-w-full whitespace-pre-wrap wrap-anywhere rounded-[20px] bg-chat-user px-[18px] py-3 text-[15.5px] leading-[1.45] text-chat-user-foreground"
                 dir="auto"
               >
                 {block.text}
@@ -3155,20 +5681,21 @@ const MessageView = memo(function MessageView({
         }
         if (block.kind === "text") {
           return (
-            <div key={i} className="flex justify-start">
+            <div key={i} className="flex w-fit max-w-full justify-start">
               <div
-                className="max-w-[74%] rounded-[20px] bg-[#1A1A1D] px-[18px] py-3 text-[15.5px] leading-[1.5] text-[#DFDFE2]"
+                data-testid="message-bot-bubble"
+                className="max-w-full rounded-[20px] bg-muted px-[18px] py-3 text-[15.5px] leading-[1.5] text-foreground/90"
                 dir="auto"
               >
                 <ChatMarkdown>{block.text}</ChatMarkdown>
                 {voiceReady ? (
                   <button
                     type="button"
-                    aria-label={speaking ? "Stop speaking" : "Speak this reply"}
+                    aria-label={speaking ? t`Stop speaking` : t`Speak this reply`}
                     onClick={onSpeak}
-                    className="mt-2 text-[12px] text-[#85858A] hover:text-[#ECECEE]"
+                    className="mt-2 text-[12px] text-muted-foreground hover:text-foreground"
                   >
-                    {speaking ? "Stop" : "Speak"}
+                    {speaking ? <Trans>Stop</Trans> : <Trans>Speak</Trans>}
                   </button>
                 ) : null}
               </div>
@@ -3178,12 +5705,12 @@ const MessageView = memo(function MessageView({
         if (block.kind === "card") {
           return (
             <div key={i} className="flex justify-start">
-              <div className="flex flex-col gap-2 rounded-[20px] bg-[#1A1A1D] px-5 py-4">
+              <div className="flex flex-col gap-2 rounded-[20px] bg-muted px-5 py-4">
                 {block.lines.map((line) => (
                   <div key={line.k} className="flex items-baseline gap-2.5 text-[15px]">
-                    <span className="text-[#30A24B]">✓</span>
+                    <span className="text-success">✓</span>
                     <span className="font-semibold text-white">{line.k}</span>
-                    <span className="text-[#85858A]">→</span>
+                    <span className="text-muted-foreground">→</span>
                     <span>{line.v}</span>
                   </div>
                 ))}
@@ -3201,6 +5728,7 @@ const MessageView = memo(function MessageView({
             />
           );
         }
+        if (block.kind === "cloud_agent") return <CloudAgentCard key={i} block={block} />;
         if (block.kind === "skill_draft") {
           return (
             <div key={i} className="flex justify-start">
@@ -3212,15 +5740,23 @@ const MessageView = memo(function MessageView({
           return (
             <div
               key={i}
-              className="w-[340px] rounded-[18px] border border-[#232326] bg-[#17171A] px-[18px] py-4"
+              className="w-[340px] rounded-[18px] border border-border bg-muted px-[18px] py-4"
             >
               <div className="flex items-center justify-between">
-                <span className="text-[15px] font-medium text-[#ECECEE]">Computer</span>
-                <span className="rounded-full bg-[rgba(48,162,75,.14)] px-[11px] py-1 text-[13px] text-[#4ECB71]">
+                <span className="text-[15px] font-medium text-foreground">
+                  <Trans>Computer</Trans>
+                </span>
+                <span
+                  className={
+                    block.state === "Needs you"
+                      ? "rounded-full bg-warning/15 px-[11px] py-1 text-[13px] text-warning"
+                      : "rounded-full bg-success/15 px-[11px] py-1 text-[13px] text-success"
+                  }
+                >
                   {block.state}
                 </span>
               </div>
-              <div className="my-2.5 text-[14.5px] leading-[1.5] text-[#A8A8AD]">
+              <div className="my-2.5 text-[14.5px] leading-[1.5] text-foreground/75">
                 <ChatMarkdown>{block.text}</ChatMarkdown>
               </div>
             </div>
@@ -3231,634 +5767,6 @@ const MessageView = memo(function MessageView({
     </>
   );
 });
-
-function ComputerModePicker({
-  value,
-  onChange,
-}: {
-  value: ComputerMode;
-  onChange: (value: ComputerMode) => void;
-}) {
-  return (
-    <div className="mt-4">
-      <div className="text-[14px] text-[#85858A]">Computer</div>
-      <div className="mt-2 grid grid-cols-2 gap-2">
-        {(["team", "dedicated"] as const).map((mode) => (
-          <button
-            key={mode}
-            type="button"
-            aria-pressed={value === mode}
-            onClick={() => onChange(mode)}
-            className={`rounded-[11px] border px-3.5 py-3 text-[14px] capitalize ${
-              value === mode
-                ? "border-[#6C6C70] bg-[#1A1A1D] text-[#ECECEE]"
-                : "border-[#26262A] text-[#85858A]"
-            }`}
-          >
-            {mode === "team" ? "Team" : "Private"}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function CreateBotForm({
-  onCreate,
-  onCancel,
-}: {
-  onCreate: (input: {
-    name: string;
-    title: string;
-    description: string;
-    computerMode: ComputerMode;
-  }) => Promise<void>;
-  onCancel: () => void;
-}) {
-  const [name, setName] = useState("");
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [computerMode, setComputerMode] = useState<ComputerMode>("team");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function handleSubmit() {
-    if (!name.trim() || submitting) return;
-    setError(null);
-    setSubmitting(true);
-    try {
-      await onCreate({ name, title, description, computerMode });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not create bot");
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <div>
-      <div className="mb-4 flex items-center justify-between">
-        <span className="text-[13.5px] text-[#85858A]">New bot</span>
-        <button type="button" aria-label="Cancel new bot" onClick={onCancel}>
-          <X size={16} strokeWidth={1.8} />
-        </button>
-      </div>
-      {error ? (
-        <p role="alert" data-testid="create-bot-error" className="mb-3 text-[13px] text-[#C94244]">
-          {error}
-        </p>
-      ) : null}
-      <label className="mt-6 block text-[14px] text-[#85858A]">
-        Name
-        <input
-          value={name}
-          maxLength={BOT_NAME_MAX_LENGTH}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="Name this bot"
-          className="mt-2 w-full rounded-[11px] border border-[#26262A] bg-transparent px-3.5 py-3 text-[#ECECEE]"
-        />
-      </label>
-      <label className="mt-4 block text-[14px] text-[#85858A]">
-        Title
-        <input
-          value={title}
-          maxLength={BOT_TITLE_MAX_LENGTH}
-          onChange={(e) => setTitle(e.target.value)}
-          placeholder="Describe what this bot does"
-          className="mt-2 w-full rounded-[11px] border border-[#26262A] bg-transparent px-3.5 py-3 text-[#ECECEE]"
-        />
-      </label>
-      <label className="mt-4 block text-[14px] text-[#85858A]">
-        Description
-        <textarea
-          value={description}
-          maxLength={BOT_DESCRIPTION_MAX_LENGTH}
-          onChange={(e) => setDescription(e.target.value)}
-          placeholder="What this bot is for"
-          rows={4}
-          className="mt-2 w-full rounded-[11px] border border-[#26262A] bg-transparent px-3.5 py-3 text-[#ECECEE]"
-        />
-      </label>
-      <ComputerModePicker value={computerMode} onChange={setComputerMode} />
-      <button
-        type="button"
-        disabled={!name.trim() || submitting}
-        onClick={() => void handleSubmit()}
-        className="mt-5 rounded-[11px] bg-[#F1F1EF] px-4 py-2 text-[#17171A] disabled:opacity-40"
-      >
-        {submitting ? "Creating…" : "Create"}
-      </button>
-    </div>
-  );
-}
-
-function BotSettings({
-  bot,
-  memoryProviderConfigured,
-  onSave,
-  onExport,
-  onClear,
-}: {
-  bot: Bot;
-  memoryProviderConfigured: boolean;
-  onSave: (patch: {
-    name?: string;
-    title?: string;
-    description?: string;
-    instructions?: string;
-    computerMode: ComputerMode;
-    memoryScope?: "isolated" | "shared" | null;
-    autoSpeak?: boolean;
-    voiceId?: string | null;
-  }) => Promise<void>;
-  onExport: () => Promise<void>;
-  onClear: () => void;
-}) {
-  const [name, setName] = useState(bot.name);
-  const [title, setTitle] = useState(bot.title);
-  const [description, setDescription] = useState(bot.description);
-  const [computerMode, setComputerMode] = useState(bot.computerMode);
-  const [memoryScope, setMemoryScope] = useState(bot.memoryScope);
-  const [autoSpeak, setAutoSpeak] = useState(bot.autoSpeak);
-  const [voiceId, setVoiceId] = useState(bot.voiceId ?? "");
-  const [voices, setVoices] = useState<VoiceInfo[]>([]);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    void rpc.voice
-      .voices({})
-      .then(setVoices)
-      .catch(() => setVoices([]));
-  }, []);
-
-  return (
-    <div data-testid="bot-settings">
-      <div className="flex justify-center">
-        <BotAvatar color={bot.color} size={64} status={bot.status} />
-      </div>
-      <label className="mt-6 block text-[14px] text-[#85858A]">
-        Name
-        <input
-          value={name}
-          maxLength={BOT_NAME_MAX_LENGTH}
-          onChange={(e) => setName(e.target.value)}
-          className="mt-2 w-full rounded-[11px] border border-[#26262A] bg-transparent px-3.5 py-3 text-[#ECECEE]"
-        />
-      </label>
-      <label className="mt-4 block text-[14px] text-[#85858A]">
-        Title
-        <input
-          value={title}
-          maxLength={BOT_TITLE_MAX_LENGTH}
-          onChange={(e) => setTitle(e.target.value)}
-          className="mt-2 w-full rounded-[11px] border border-[#26262A] bg-transparent px-3.5 py-3 text-[#ECECEE]"
-        />
-      </label>
-      <label className="mt-4 block text-[14px] text-[#85858A]">
-        Description
-        <textarea
-          value={description}
-          maxLength={BOT_DESCRIPTION_MAX_LENGTH}
-          onChange={(e) => setDescription(e.target.value)}
-          rows={4}
-          className="mt-2 w-full rounded-[11px] border border-[#26262A] bg-transparent px-3.5 py-3 text-[#ECECEE]"
-        />
-      </label>
-      <ComputerModePicker value={computerMode} onChange={setComputerMode} />
-      {memoryProviderConfigured ? (
-        <div className="mt-4 text-[14px] text-[#85858A]">
-          Memory scope
-          <div className="mt-2 flex gap-2">
-            {(
-              [
-                { value: null, label: "Inherit default" },
-                { value: "isolated" as const, label: "Isolated" },
-                { value: "shared" as const, label: "Shared" },
-              ] satisfies Array<{ value: "isolated" | "shared" | null; label: string }>
-            ).map((option) => (
-              <button
-                key={option.label}
-                type="button"
-                aria-pressed={memoryScope === option.value}
-                onClick={() => setMemoryScope(option.value)}
-                className={`flex-1 rounded-[11px] border px-3 py-2 text-[13px] ${
-                  memoryScope === option.value
-                    ? "border-[#4A4A50] bg-[#1A1A1D] text-[#ECECEE]"
-                    : "border-[#26262A] text-[#85858A]"
-                }`}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-        </div>
-      ) : null}
-      <label className="mt-5 flex cursor-pointer items-center gap-3 text-[14px] text-[#C9C9CE]">
-        <input
-          type="checkbox"
-          checked={autoSpeak}
-          onChange={(event) => setAutoSpeak(event.target.checked)}
-        />
-        Read replies aloud
-      </label>
-      {voices.length ? (
-        <label className="mt-4 block text-[14px] text-[#85858A]">
-          Voice
-          <select
-            value={voiceId}
-            onChange={(event) => setVoiceId(event.target.value)}
-            className="mt-2 w-full rounded-[11px] border border-[#26262A] bg-transparent px-3.5 py-3 text-[#ECECEE]"
-          >
-            <option value="">Account default</option>
-            {voices.map((voice) => (
-              <option key={voice.id} value={voice.id}>
-                {voice.label}
-              </option>
-            ))}
-          </select>
-        </label>
-      ) : null}
-      {error ? <p className="mt-2 text-[13px] text-[#E65707]">{error}</p> : null}
-      <div className="mt-5 flex flex-col items-start gap-3">
-        <button
-          type="button"
-          disabled={saving}
-          onClick={() => {
-            setSaving(true);
-            setError(null);
-            void onSave({
-              name,
-              title,
-              description,
-              instructions: description,
-              computerMode,
-              memoryScope,
-              autoSpeak,
-              voiceId: voiceId || null,
-            })
-              .catch((err) => setError(err instanceof Error ? err.message : "Could not save"))
-              .finally(() => setSaving(false));
-          }}
-          className="rounded-[11px] bg-[#F1F1EF] px-4 py-2 text-[#17171A] disabled:opacity-40"
-        >
-          Save
-        </button>
-        <button
-          type="button"
-          onClick={() => void onExport()}
-          className="text-[14px] text-[#85858A]"
-        >
-          Export
-        </button>
-        <button type="button" onClick={onClear} className="text-[14px] text-[#E65707]">
-          Clear conversation
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function NewBotSectionDialog({
-  bot,
-  onCancel,
-  onConfirm,
-}: {
-  bot: Bot;
-  onCancel: () => void;
-  onConfirm: (name: string) => Promise<void>;
-}) {
-  const [name, setName] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !saving) onCancel();
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onCancel, saving]);
-
-  return (
-    <div
-      role="presentation"
-      className="absolute inset-0 z-50 grid place-items-center bg-[rgba(4,4,5,.76)] px-5"
-      onPointerDown={() => {
-        if (!saving) onCancel();
-      }}
-    >
-      <form
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="new-bot-section-title"
-        className="w-full max-w-[420px] rounded-[18px] border border-[#343438] bg-[#1A1A1D] p-5 shadow-[0_24px_70px_rgba(0,0,0,.65)]"
-        onPointerDown={(event) => event.stopPropagation()}
-        onSubmit={(event) => {
-          event.preventDefault();
-          const trimmed = name.trim();
-          if (!trimmed || saving) return;
-          setSaving(true);
-          setError(null);
-          void onConfirm(trimmed).catch((err: unknown) => {
-            setError(err instanceof Error ? err.message : "Could not create section");
-            setSaving(false);
-          });
-        }}
-      >
-        <h2 id="new-bot-section-title" className="text-[17px] font-medium text-[#F1F1F2]">
-          New section
-        </h2>
-        <p className="mt-2 text-[14px] leading-6 text-[#9A9AA0]">
-          Create a section and move {bot.name} into it.
-        </p>
-        <label className="mt-4 block text-[13.5px] text-[#C9C9CE]">
-          Name
-          <input
-            maxLength={60}
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            className="mt-2 w-full rounded-[11px] border border-[#343438] bg-[#101012] px-3.5 py-2.5 text-[14.5px] text-[#ECECEE] outline-none focus:border-[#66666D]"
-          />
-        </label>
-        {error ? <p className="mt-3 text-[13.5px] text-[#FF5364]">{error}</p> : null}
-        <div className="mt-5 flex justify-end gap-2.5">
-          <button
-            type="button"
-            disabled={saving}
-            onClick={onCancel}
-            className="rounded-[10px] px-3.5 py-2 text-[14px] text-[#C9C9CE] hover:bg-[#29292D] disabled:opacity-40"
-          >
-            Cancel
-          </button>
-          <button
-            type="submit"
-            disabled={saving || !name.trim()}
-            className="rounded-[10px] bg-[#F1F1EF] px-3.5 py-2 text-[14px] font-medium text-[#17171A] disabled:opacity-40"
-          >
-            {saving ? "Creating…" : "Create"}
-          </button>
-        </div>
-      </form>
-    </div>
-  );
-}
-
-function ClearConversationDialog({
-  bot,
-  onCancel,
-  onConfirm,
-}: {
-  bot: Bot;
-  onCancel: () => void;
-  onConfirm: () => Promise<void>;
-}) {
-  const [clearing, setClearing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !clearing) onCancel();
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [clearing, onCancel]);
-
-  return (
-    <div
-      role="presentation"
-      className="absolute inset-0 z-50 grid place-items-center bg-[rgba(4,4,5,.76)] px-5"
-      onPointerDown={() => {
-        if (!clearing) onCancel();
-      }}
-    >
-      <div
-        role="alertdialog"
-        aria-modal="true"
-        aria-labelledby="clear-conversation-title"
-        aria-describedby="clear-conversation-description"
-        className="w-full max-w-[420px] rounded-[18px] border border-[#343438] bg-[#1A1A1D] p-5 shadow-[0_24px_70px_rgba(0,0,0,.65)]"
-        onPointerDown={(event) => event.stopPropagation()}
-      >
-        <h2 id="clear-conversation-title" className="text-[17px] font-medium text-[#F1F1F2]">
-          Clear {bot.name}’s conversation?
-        </h2>
-        <p
-          id="clear-conversation-description"
-          className="mt-2 text-[14px] leading-6 text-[#9A9AA0]"
-        >
-          This permanently removes every message and stops current work. The bot, computer, memory,
-          and routines are kept.
-        </p>
-        {error ? <p className="mt-3 text-[13.5px] text-[#FF5364]">{error}</p> : null}
-        <div className="mt-5 flex justify-end gap-2.5">
-          <button
-            type="button"
-            disabled={clearing}
-            onClick={onCancel}
-            className="rounded-[10px] px-3.5 py-2 text-[14px] text-[#C9C9CE] hover:bg-[#29292D] disabled:opacity-40"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            disabled={clearing}
-            onClick={() => {
-              setClearing(true);
-              setError(null);
-              void onConfirm().catch((err: unknown) => {
-                setError(err instanceof Error ? err.message : "Could not clear conversation");
-                setClearing(false);
-              });
-            }}
-            className="rounded-[10px] bg-[#FF5364] px-3.5 py-2 text-[14px] font-medium text-white disabled:opacity-40"
-          >
-            {clearing ? "Clearing…" : "Clear"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function DeleteBotDialog({
-  bot,
-  onCancel,
-  onConfirm,
-}: {
-  bot: Bot;
-  onCancel: () => void;
-  onConfirm: (deleteMemories: boolean) => Promise<void>;
-}) {
-  const [deleting, setDeleting] = useState(false);
-  const [deleteMemories, setDeleteMemories] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !deleting) onCancel();
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [deleting, onCancel]);
-
-  return (
-    <div
-      role="presentation"
-      className="absolute inset-0 z-50 grid place-items-center bg-[rgba(4,4,5,.76)] px-5"
-      onPointerDown={() => {
-        if (!deleting) onCancel();
-      }}
-    >
-      <div
-        role="alertdialog"
-        aria-modal="true"
-        aria-labelledby="delete-bot-title"
-        aria-describedby="delete-bot-description"
-        className="w-full max-w-[420px] rounded-[18px] border border-[#343438] bg-[#1A1A1D] p-5 shadow-[0_24px_70px_rgba(0,0,0,.65)]"
-        onPointerDown={(event) => event.stopPropagation()}
-      >
-        <h2 id="delete-bot-title" className="text-[17px] font-medium text-[#F1F1F2]">
-          Delete {bot.name}?
-        </h2>
-        <p id="delete-bot-description" className="mt-2 text-[14px] leading-6 text-[#9A9AA0]">
-          Its conversation, files, and routines will be permanently deleted. Bots it created stay in
-          your list.
-        </p>
-        <fieldset className="mt-4 space-y-2">
-          <legend className="mb-2 text-[13.5px] text-[#C9C9CE]">What about its memories?</legend>
-          <label className="flex cursor-pointer gap-3 rounded-[11px] border border-[#343438] p-3">
-            <input
-              type="radio"
-              name="delete-memory"
-              checked={!deleteMemories}
-              onChange={() => setDeleteMemories(false)}
-            />
-            <span>
-              <span className="block text-[14px] text-[#ECECEE]">Keep memories</span>
-              <span className="mt-0.5 block text-[12.5px] text-[#85858A]">
-                Move them to your shared memory.
-              </span>
-            </span>
-          </label>
-          <label className="flex cursor-pointer gap-3 rounded-[11px] border border-[#343438] p-3">
-            <input
-              type="radio"
-              name="delete-memory"
-              checked={deleteMemories}
-              onChange={() => setDeleteMemories(true)}
-            />
-            <span>
-              <span className="block text-[14px] text-[#ECECEE]">Delete memories too</span>
-              <span className="mt-0.5 block text-[12.5px] text-[#85858A]">
-                This cannot be undone.
-              </span>
-            </span>
-          </label>
-        </fieldset>
-        {error ? <p className="mt-3 text-[13.5px] text-[#FF5364]">{error}</p> : null}
-        <div className="mt-5 flex justify-end gap-2.5">
-          <button
-            type="button"
-            disabled={deleting}
-            onClick={onCancel}
-            className="rounded-[10px] px-3.5 py-2 text-[14px] text-[#C9C9CE] hover:bg-[#29292D] disabled:opacity-40"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            disabled={deleting}
-            onClick={() => {
-              setDeleting(true);
-              setError(null);
-              void onConfirm(deleteMemories).catch((err: unknown) => {
-                setError(err instanceof Error ? err.message : "Could not delete bot");
-                setDeleting(false);
-              });
-            }}
-            className="rounded-[10px] bg-[#FF5364] px-3.5 py-2 text-[14px] font-medium text-white disabled:opacity-40"
-          >
-            {deleting ? "Deleting…" : "Delete"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function DeleteRoutineDialog({
-  routine,
-  onCancel,
-  onConfirm,
-}: {
-  routine: Routine;
-  onCancel: () => void;
-  onConfirm: () => Promise<void>;
-}) {
-  const [deleting, setDeleting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !deleting) onCancel();
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [deleting, onCancel]);
-
-  return (
-    <div
-      role="presentation"
-      className="absolute inset-0 z-50 grid place-items-center bg-[rgba(4,4,5,.76)] px-5"
-      onPointerDown={() => {
-        if (!deleting) onCancel();
-      }}
-    >
-      <div
-        role="alertdialog"
-        aria-modal="true"
-        aria-labelledby="delete-routine-title"
-        aria-describedby="delete-routine-description"
-        className="w-full max-w-[420px] rounded-[18px] border border-[#343438] bg-[#1A1A1D] p-5 shadow-[0_24px_70px_rgba(0,0,0,.65)]"
-        onPointerDown={(event) => event.stopPropagation()}
-      >
-        <h2 id="delete-routine-title" className="text-[17px] font-medium text-[#F1F1F2]">
-          Delete {routine.name}?
-        </h2>
-        <p id="delete-routine-description" className="mt-2 text-[14px] leading-6 text-[#9A9AA0]">
-          This cannot be undone.
-        </p>
-        {error ? <p className="mt-3 text-[13.5px] text-[#FF5364]">{error}</p> : null}
-        <div className="mt-5 flex justify-end gap-2.5">
-          <button
-            type="button"
-            disabled={deleting}
-            onClick={onCancel}
-            className="rounded-[10px] px-3.5 py-2 text-[14px] text-[#C9C9CE] hover:bg-[#29292D] disabled:opacity-40"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            disabled={deleting}
-            onClick={() => {
-              setDeleting(true);
-              setError(null);
-              void onConfirm().catch((err: unknown) => {
-                setError(err instanceof Error ? err.message : "Could not delete routine");
-                setDeleting(false);
-              });
-            }}
-            className="rounded-[10px] bg-[#FF5364] px-3.5 py-2 text-[14px] font-medium text-white disabled:opacity-40"
-          >
-            {deleting ? "Deleting…" : "Delete"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 function embeddableScreenUrl(url: string | null): string | null {
   if (!url) return null;
@@ -3887,518 +5795,38 @@ function screenIframeSandbox(url: string | null) {
   }
 }
 
+function DesktopKindEmptyState({ className }: { className?: string }) {
+  return (
+    <div className={className}>
+      <Trans>
+        This bot runs on this computer, not a Linux desktop. Shell and files use your home folder.
+      </Trans>
+    </div>
+  );
+}
+
 function computerPlaceholder(
   state: ComputerStatus["state"] | undefined,
   booting: boolean,
   label: string,
 ) {
-  if (state === "booting" || booting) return "Booting live desktop…";
+  if (state === "booting" || booting) return t`Booting live desktop…`;
   if (state === "running") return label;
-  if (state === "suspended") return "Computer is asleep — take control to wake it";
-  if (state === "error") return "Computer failed to boot";
-  return "Computer is stopped";
+  if (state === "suspended") return t`Computer is asleep. Open it to wake.`;
+  if (state === "error") return t`Computer failed to boot`;
+  return t`Computer is stopped`;
 }
 
 function computerLabel(mode: ComputerStatus["mode"] | undefined, botName: string) {
-  return mode === "dedicated" ? `${botName}’s computer` : "Team Computer";
+  return mode === "dedicated" ? t`${botName}’s computer` : t`Team Computer`;
 }
 
-function ChoiceCard({
-  botId,
-  block,
-  onBotChanged,
-}: {
-  botId: string;
-  block: Extract<MessageBlock, { kind: "choice" }>;
-  onBotChanged: () => Promise<void>;
-}) {
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function choose(optionId: string) {
-    setPending(true);
-    setError(null);
-    try {
-      await rpc.onboarding.choose({ botId, optionId });
-      await onBotChanged().catch(() => undefined);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not save this choice");
-      setPending(false);
-    }
+function newClientNonce(): string {
+  const webCrypto = globalThis.crypto;
+  if (webCrypto && typeof webCrypto.randomUUID === "function") {
+    return webCrypto.randomUUID();
   }
-
-  return (
-    <div className="flex justify-start">
-      <div className="w-[min(420px,80%)] rounded-[20px] bg-[#1A1A1D] px-[18px] py-[14px]">
-        <div className="text-[15.5px] text-[#DFDFE2]">{block.question}</div>
-        {block.subtitle ? (
-          <div className="mt-0.5 text-[13px] text-[#85858A]">{block.subtitle}</div>
-        ) : null}
-        <div className="mt-3 space-y-1.5">
-          {block.options
-            .filter((option) => !block.answerId || option.id === block.answerId)
-            .map((option) => (
-              <button
-                key={option.id}
-                type="button"
-                disabled={Boolean(block.answerId) || pending}
-                onClick={() => void choose(option.id)}
-                className={`flex w-full items-center gap-3 rounded-[12px] border border-[#2A2A2F] px-3.5 py-3 text-start disabled:opacity-60 ${block.answerId ? "bg-[#1F1F23]" : "bg-[#161619] hover:bg-[#222226]"}`}
-              >
-                <span className="grid h-[24px] w-[24px] place-items-center rounded-[7px] bg-[#232327] text-[12.5px] text-[#9A9AA0]">
-                  {option.letter}
-                </span>
-                <span
-                  className={`flex-1 text-[15px] ${block.answerId ? "text-[#85858A]" : "text-[#ECECEE]"}`}
-                >
-                  {option.label}
-                </span>
-                {block.answerId === option.id ? <span className="text-[#B9B9C0]">✓</span> : null}
-              </button>
-            ))}
-        </div>
-        {error ? <p className="mt-2 text-xs text-[#F07178]">{error}</p> : null}
-      </div>
-    </div>
-  );
-}
-
-function AppConnectCard({
-  botId,
-  block,
-}: {
-  botId: string;
-  block: Extract<MessageBlock, { kind: "app_connect" }>;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [localStatus, setLocalStatus] = useState<"pending" | "connected">(block.status);
-  const [error, setError] = useState<string | null>(null);
-  const connectionAttempt = useRef<AbortController | null>(null);
-  const status = block.status === "connected" ? "connected" : localStatus;
-  useEffect(() => () => connectionAttempt.current?.abort(), []);
-
-  async function authorize() {
-    connectionAttempt.current?.abort();
-    const controller = new AbortController();
-    connectionAttempt.current = controller;
-    setBusy(true);
-    setError(null);
-    try {
-      const started = await rpc.connections.begin({
-        provider: block.provider,
-        displayName: block.name,
-      });
-      if (started.authorizationUrl) {
-        window.open(started.authorizationUrl, "rakazo-app-connect", "popup,width=560,height=720");
-      }
-      for (let i = 0; i < 60; i += 1) {
-        if (controller.signal.aborted) return;
-        const row = await rpc.connections
-          .complete({ connectionId: started.connectionId })
-          .catch(() => undefined);
-        if (row?.status === "connected") {
-          if (controller.signal.aborted) return;
-          setLocalStatus("connected");
-          await rpc.onboarding
-            .appConnected({ botId, provider: block.provider })
-            .catch(() => undefined);
-          return;
-        }
-        await abortableDelay(2_000, controller.signal);
-      }
-      if (!controller.signal.aborted) setError("Authorization timed out. Please try again.");
-    } catch (error) {
-      if (!controller.signal.aborted) {
-        setError(error instanceof Error ? error.message : "Could not authorize this app");
-      }
-    } finally {
-      if (connectionAttempt.current === controller) {
-        connectionAttempt.current = null;
-        setBusy(false);
-      }
-    }
-  }
-  return (
-    <BuiCard
-      role="group"
-      aria-label={`${block.name} connection`}
-      className="w-[min(420px,80%)] px-4 py-3.5"
-    >
-      <div className="flex items-center gap-3.5">
-        {block.logo ? (
-          <img
-            src={block.logo}
-            alt=""
-            className="h-10 w-10 rounded-[10px] bg-white object-contain p-1"
-          />
-        ) : (
-          <span className="grid h-10 w-10 place-items-center rounded-[10px] bg-[#30356A] text-[15px] text-[#E2E4FF]">
-            {block.name.slice(0, 1).toUpperCase()}
-          </span>
-        )}
-        <span className="min-w-0 flex-1">
-          <span className="block text-[15px] font-medium" style={{ color: "var(--bui-ink)" }}>
-            {block.name}
-          </span>
-          <span className="block truncate text-[13px]" style={{ color: "var(--bui-ink-3)" }}>
-            {block.description}
-          </span>
-        </span>
-        {status === "connected" ? (
-          <SuccessPop label="Connected" />
-        ) : (
-          <BuiButton disabled={busy} onClick={() => void authorize()}>
-            {busy ? "Waiting…" : "Authorize"}
-          </BuiButton>
-        )}
-      </div>
-      {error ? <p className="mt-2 text-xs text-[#F07178]">{error}</p> : null}
-    </BuiCard>
-  );
-}
-
-function ChartCanvas({
-  spec,
-  data,
-  width,
-  height,
-}: {
-  spec: Record<string, unknown>;
-  data: unknown[];
-  width: number;
-  height?: number;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [meta, setMeta] = useState<{
-    title?: string;
-    swatches: { label: string; color: string }[];
-  }>({ swatches: [] });
-  useEffect(() => {
-    let cancelled = false;
-    // Plot loads lazily so threads without charts never pay for the library.
-    void (async () => {
-      try {
-        const { buildPlotParts } = await import("@rakazo/core/plot");
-        if (cancelled || !ref.current) return;
-        // Hover inspection by default: give the first mark a tooltip unless
-        // the spec already asks for one somewhere.
-        const marks = Array.isArray((spec as { marks?: unknown[] }).marks)
-          ? ((spec as { marks: { options?: Record<string, unknown> }[] }).marks ?? [])
-          : [];
-        const hasTip = marks.some((mark) => mark.options && "tip" in mark.options);
-        const liveSpec = hasTip
-          ? spec
-          : {
-              ...spec,
-              marks: marks.map((mark, index) =>
-                index === 0 ? { ...mark, options: { ...(mark.options ?? {}), tip: true } } : mark,
-              ),
-            };
-        const parts = buildPlotParts(liveSpec as never, data, document, { width, height });
-        setMeta({ title: parts.title, swatches: parts.swatches });
-        setError(null);
-        ref.current.replaceChildren(parts.plotted);
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Could not render chart");
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [spec, data, width, height]);
-  if (error)
-    return <div className="text-[13px] text-[#F3A2AA]">Chart failed to render: {error}</div>;
-  return (
-    <div className="text-[#C9C9CE]">
-      {meta.title ? (
-        <div className="mb-1 text-[14.5px] font-semibold text-[#ECECEE]">{meta.title}</div>
-      ) : null}
-      {meta.swatches.length > 0 ? (
-        <div className="mb-2 flex flex-wrap gap-x-3 gap-y-1">
-          {meta.swatches.map((swatch) => (
-            <span
-              key={swatch.label}
-              className="flex items-center gap-1.5 text-[12px] text-[#A6A6AD]"
-            >
-              <span
-                className="h-[10px] w-[10px] rounded-[3px]"
-                style={{ background: swatch.color }}
-              />
-              {swatch.label}
-            </span>
-          ))}
-        </div>
-      ) : null}
-      <div ref={ref} className="[&_svg]:max-w-full" />
-    </div>
-  );
-}
-
-type McpApprovalState = "pending" | "connecting" | "connected" | "dismissed";
-
-/** Approval card for an agent-created MCP server: the user completes browser
- * OAuth (or confirms no authorization is needed) without leaving the chat. */
-function McpApprovalCard({
-  botId,
-  name,
-  serverId,
-  transport,
-  endpoint,
-  needsOAuth,
-}: {
-  botId: string | undefined;
-  name: string;
-  serverId: string;
-  transport: string;
-  endpoint: string | null;
-  needsOAuth: boolean;
-}) {
-  const [state, setState] = useState<McpApprovalState>("pending");
-  const [error, setError] = useState<string | null>(null);
-
-  async function authorize() {
-    if (!botId) {
-      setError("This server cannot be assigned without a bot.");
-      return;
-    }
-    setState("connecting");
-    setError(null);
-    try {
-      if (needsOAuth) {
-        const result = await connectMcpOauth(serverId);
-        if (result === "cancelled") {
-          setState("pending");
-          return;
-        }
-      }
-      await rpc.mcp.assignments.approve({ botId, serverId });
-      setState("connected");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not approve this server");
-      setState("pending");
-    }
-  }
-
-  const summary = endpoint ?? `stdio · ${transport}`;
-  return (
-    <BuiCard className="max-w-[74%] p-4">
-      <div className="flex items-center gap-2">
-        <span className="grid h-7 w-7 place-items-center rounded-lg bg-[#30356A] text-xs text-[#E2E4FF]">
-          M
-        </span>
-        <span className="text-[14.5px] font-medium" style={{ color: "var(--bui-ink)" }}>
-          Connect MCP server “{name}”
-        </span>
-      </div>
-      <p className="mt-1.5 truncate text-[12px]" style={{ color: "var(--bui-ink-3)" }}>
-        {summary}
-      </p>
-      {state === "pending" || state === "connecting" ? (
-        <>
-          <p className="mt-2 text-[13px] leading-[1.5]" style={{ color: "var(--bui-ink-2)" }}>
-            {needsOAuth
-              ? "This server uses browser sign-in. Authorize it to let your agents use its tools — a popup will open."
-              : "Approve this server to let your agent use its tools."}
-          </p>
-          {error ? <p className="mt-2 text-xs text-[#F07178]">{error}</p> : null}
-          <div className="mt-3 flex gap-2">
-            <BuiButton
-              tone="accent"
-              disabled={state === "connecting"}
-              onClick={() => void authorize()}
-            >
-              {state === "connecting" ? "Connecting…" : needsOAuth ? "Authorize" : "Approve"}
-            </BuiButton>
-            <BuiButton onClick={() => setState("dismissed")}>Not now</BuiButton>
-          </div>
-        </>
-      ) : null}
-      {state === "connected" ? (
-        <div className="mt-3">
-          <SuccessPop label="Connected — its tools are available from your next message." />
-        </div>
-      ) : null}
-      {state === "dismissed" ? (
-        <p className="mt-2 text-[13px] text-[#85858A]">
-          Dismissed — reconnect anytime from MCP settings.
-        </p>
-      ) : null}
-    </BuiCard>
-  );
-}
-
-function ChartBlockView({
-  name,
-  spec,
-  data,
-}: {
-  name: string;
-  spec: Record<string, unknown>;
-  data: unknown[];
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const [viewport, setViewport] = useState(() => ({
-    width: window.innerWidth,
-    height: window.innerHeight,
-  }));
-  useEffect(() => {
-    if (!expanded) return;
-    setViewport({ width: window.innerWidth, height: window.innerHeight });
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setExpanded(false);
-    };
-    const onResize = () => setViewport({ width: window.innerWidth, height: window.innerHeight });
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("resize", onResize);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("resize", onResize);
-    };
-  }, [expanded]);
-  const expandedViewport = chartViewport(viewport.width, viewport.height);
-  return (
-    <>
-      <div className="group relative max-w-[74%] rounded-[20px] bg-[#17171A] p-4">
-        <ChartCanvas spec={spec} data={data} width={520} />
-        <button
-          type="button"
-          onClick={() => setExpanded(true)}
-          className="absolute end-3 top-3 rounded-lg border border-[#34343B] bg-[#1F1F22] px-2.5 py-1 text-[11px] text-[#B9B9C0] opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#A6A6AD]"
-        >
-          Expand
-        </button>
-      </div>
-      {expanded ? (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(4,4,5,.78)] p-8"
-          role="dialog"
-          aria-modal="true"
-          aria-label={name}
-          onClick={(event) => {
-            if (event.target === event.currentTarget) setExpanded(false);
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Escape") setExpanded(false);
-          }}
-        >
-          <div className="max-h-[92vh] w-[min(1320px,94vw)] overflow-auto rounded-[24px] border border-[#2A2A31] bg-[#141416] p-8 shadow-[0_40px_90px_rgba(0,0,0,.6)]">
-            <div className="mb-3 flex items-center justify-between">
-              <span className="text-[13px] text-[#85858A]">{name}</span>
-              <button
-                type="button"
-                aria-label="Close chart"
-                onClick={() => setExpanded(false)}
-                className="text-lg text-[#85858A] hover:text-[#DFDFE2]"
-              >
-                ✕
-              </button>
-            </div>
-            <ChartCanvas
-              spec={spec}
-              data={data}
-              width={expandedViewport.width}
-              height={expandedViewport.height}
-            />
-          </div>
-        </div>
-      ) : null}
-    </>
-  );
-}
-
-function ArtifactImage({
-  target,
-  artifactId,
-  name,
-}: {
-  target: ArtifactTarget;
-  artifactId: string;
-  name: string;
-}) {
-  const [src, setSrc] = useState<string | null>(null);
-  const [open, setOpen] = useState(false);
-  const [visible, setVisible] = useState(false);
-  const container = useRef<HTMLDivElement>(null);
-  const targetBotId = "botId" in target ? target.botId : undefined;
-  const targetGroupId = "groupId" in target ? target.groupId : undefined;
-
-  useEffect(() => {
-    const element = container.current;
-    if (!element || typeof IntersectionObserver === "undefined") {
-      setVisible(true);
-      return;
-    }
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
-          setVisible(true);
-          observer.disconnect();
-        }
-      },
-      { rootMargin: "320px" },
-    );
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, []);
-
-  useEffect(() => {
-    if (!visible) return;
-    let cancelled = false;
-    let objectUrl: string | null = null;
-    setSrc(null);
-    void rpc.artifacts
-      .get(
-        targetBotId
-          ? { botId: targetBotId, artifactId }
-          : { groupId: targetGroupId ?? "", artifactId },
-      )
-      .then((artifact) => {
-        const bytes = decodeArtifactBase64(artifact.contentBase64);
-        objectUrl = URL.createObjectURL(
-          new Blob([new Uint8Array(bytes)], { type: artifact.mimeType }),
-        );
-        if (cancelled) URL.revokeObjectURL(objectUrl);
-        else setSrc(objectUrl);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [artifactId, targetBotId, targetGroupId, visible]);
-
-  return (
-    <div ref={container}>
-      {src ? (
-        <button
-          type="button"
-          onClick={() => setOpen(true)}
-          className="max-w-[240px] overflow-hidden rounded-[20px]"
-        >
-          <img src={src} alt={name} className="max-h-48 w-full object-cover" />
-        </button>
-      ) : (
-        <div className="rounded-[20px] border border-[#26262A] bg-[#17171A] px-4 py-3 text-[14px] text-[#85858A]">
-          {name}
-        </div>
-      )}
-      {open && src ? (
-        <button
-          type="button"
-          aria-label="Close image preview"
-          className="fixed inset-0 z-50 grid place-items-center bg-[rgba(4,4,5,.82)] p-6"
-          onClick={() => setOpen(false)}
-        >
-          <img
-            src={src}
-            alt={name}
-            className="max-h-[85vh] max-w-[90vw] rounded-[12px] object-contain"
-          />
-        </button>
-      ) : null}
-    </div>
-  );
+  return `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function readFileAsBase64(file: File): Promise<string> {

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   cancelScheduleFromTool,
   createScheduleFromTool,
+  filterBuiltinToolsForRun,
   filterBuiltinToolsForThread,
   isOneShotRoutineCron,
   listSchedulesFromTool,
@@ -87,22 +88,62 @@ describe("resolveScheduleTiming", () => {
 });
 
 describe("filterBuiltinToolsForThread", () => {
-  const tools = [{ name: "handoff_to_bot" }, { name: "schedule_create" }, { name: "remember" }];
+  const tools = [
+    { name: "handoff_to_bot" },
+    { name: "message_bot" },
+    { name: "schedule_create" },
+    { name: "schedule_list" },
+    { name: "schedule_cancel" },
+    { name: "remember" },
+  ];
 
-  it("keeps handoff only in groups and hides schedule tools outside 1:1", () => {
+  it("keeps handoff and schedule tools in groups", () => {
     expect(filterBuiltinToolsForThread(tools, "group-1").map((tool) => tool.name)).toEqual([
       "handoff_to_bot",
+      "schedule_create",
+      "schedule_list",
+      "schedule_cancel",
       "remember",
     ]);
     expect(filterBuiltinToolsForThread(tools, null).map((tool) => tool.name)).toEqual([
+      "message_bot",
       "schedule_create",
+      "schedule_list",
+      "schedule_cancel",
       "remember",
     ]);
+  });
+
+  it("hides schedule creation from routine runs without removing schedule management", () => {
+    expect(filterBuiltinToolsForRun(tools, "routine").map((tool) => tool.name)).toEqual([
+      "handoff_to_bot",
+      "message_bot",
+      "schedule_list",
+      "schedule_cancel",
+      "remember",
+    ]);
+    expect(filterBuiltinToolsForRun(tools, "user").map((tool) => tool.name)).toContain(
+      "schedule_create",
+    );
+  });
+
+  it("composes thread then run filters without dropping group schedule tools", () => {
+    const groupTools = filterBuiltinToolsForRun(
+      filterBuiltinToolsForThread(tools, "group-1"),
+      "routine",
+    ).map((tool) => tool.name);
+    expect(groupTools).toEqual(["handoff_to_bot", "schedule_list", "schedule_cancel", "remember"]);
+    expect(
+      filterBuiltinToolsForRun(filterBuiltinToolsForThread(tools, "group-1"), "user").map(
+        (tool) => tool.name,
+      ),
+    ).toContain("schedule_create");
   });
 
   it("covers every schedule tool name", () => {
     for (const name of SCHEDULE_TOOL_NAMES) {
       expect(filterBuiltinToolsForThread([{ name }, { name: "remember" }], "group-1")).toEqual([
+        { name },
         { name: "remember" },
       ]);
     }
@@ -132,7 +173,7 @@ describe("schedule tool persistence", () => {
     } as unknown as Parameters<typeof createScheduleFromTool>[0];
 
     const result = await createScheduleFromTool(deps, {
-      workspaceId: "ws-1",
+      spaceId: "ws-1",
       botId: "bot-1",
       userId: "user-1",
       threadId: "thread-1",
@@ -145,9 +186,10 @@ describe("schedule tool persistence", () => {
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
-          workspaceId: "ws-1",
+          spaceId: "ws-1",
           userId: "user-1",
-          cron: "*/1 * * * *",
+          threadId: "thread-1",
+          crons: ["*/1 * * * *"],
           active: true,
         }),
       }),
@@ -167,6 +209,7 @@ describe("schedule tool persistence", () => {
           create: vi.fn(async () => ({
             id: "routine-1",
             name: "Morning joke",
+            crons: ["*/1 * * * *"],
             nextRunAt: new Date(),
           })),
           delete: remove,
@@ -181,7 +224,7 @@ describe("schedule tool persistence", () => {
     } as unknown as Parameters<typeof createScheduleFromTool>[0];
 
     const result = await createScheduleFromTool(deps, {
-      workspaceId: "ws-1",
+      spaceId: "ws-1",
       botId: "bot-1",
       userId: "user-1",
       threadId: "thread-1",
@@ -203,6 +246,7 @@ describe("schedule tool persistence", () => {
           create: vi.fn(async () => ({
             id: "routine-1",
             name: "Morning joke",
+            crons: ["*/1 * * * *"],
             nextRunAt: new Date(),
           })),
           delete: remove,
@@ -218,7 +262,7 @@ describe("schedule tool persistence", () => {
     } as unknown as Parameters<typeof createScheduleFromTool>[0];
 
     const result = await createScheduleFromTool(deps, {
-      workspaceId: "ws-1",
+      spaceId: "ws-1",
       botId: "bot-1",
       userId: "user-1",
       threadId: "thread-1",
@@ -239,6 +283,7 @@ describe("schedule tool persistence", () => {
           create: vi.fn(async () => ({
             id: "routine-1",
             name: "Morning joke",
+            crons: ["*/1 * * * *"],
             nextRunAt: new Date(),
           })),
           delete: vi.fn(async () => {
@@ -257,7 +302,7 @@ describe("schedule tool persistence", () => {
     } as unknown as Parameters<typeof createScheduleFromTool>[0];
 
     const result = await createScheduleFromTool(deps, {
-      workspaceId: "ws-1",
+      spaceId: "ws-1",
       botId: "bot-1",
       userId: "user-1",
       threadId: "thread-1",
@@ -280,6 +325,7 @@ describe("schedule tool persistence", () => {
           create: vi.fn(async () => ({
             id: "routine-1",
             name: "Morning joke",
+            crons: ["*/1 * * * *"],
             nextRunAt: new Date(),
           })),
           delete: vi.fn(async () => {
@@ -301,7 +347,7 @@ describe("schedule tool persistence", () => {
 
     await expect(
       createScheduleFromTool(deps, {
-        workspaceId: "ws-1",
+        spaceId: "ws-1",
         botId: "bot-1",
         userId: "user-1",
         threadId: "thread-1",
@@ -312,7 +358,7 @@ describe("schedule tool persistence", () => {
     ).rejects.toThrow("deactivate failed");
   });
 
-  it("scopes list and cancel to workspace and user", async () => {
+  it("scopes group list and cancel to the current thread without narrowing DMs", async () => {
     const findMany = vi.fn(async () => []);
     const findFirst = vi.fn(async () => null);
     const deps = {
@@ -323,23 +369,61 @@ describe("schedule tool persistence", () => {
       jobs: { enqueue: vi.fn(async () => undefined), cancel: vi.fn(async () => undefined) },
     } as unknown as Parameters<typeof cancelScheduleFromTool>[0];
 
-    await listSchedulesFromTool(deps, { workspaceId: "ws-1", botId: "bot-1", userId: "user-1" });
+    await listSchedulesFromTool(deps, {
+      spaceId: "ws-1",
+      botId: "bot-1",
+      userId: "user-1",
+      threadId: "group-thread-1",
+    });
     expect(findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { workspaceId: "ws-1", botId: "bot-1", userId: "user-1" },
+        where: {
+          spaceId: "ws-1",
+          botId: "bot-1",
+          userId: "user-1",
+          threadId: "group-thread-1",
+        },
       }),
     );
 
     const cancelled = await cancelScheduleFromTool(deps, {
-      workspaceId: "ws-1",
+      spaceId: "ws-1",
       botId: "bot-1",
       userId: "user-1",
+      threadId: "group-thread-1",
       routineId: "routine-1",
     });
     expect(cancelled).toEqual({ error: "Schedule not found." });
     expect(findFirst).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { workspaceId: "ws-1", botId: "bot-1", userId: "user-1", id: "routine-1" },
+        where: {
+          spaceId: "ws-1",
+          botId: "bot-1",
+          userId: "user-1",
+          threadId: "group-thread-1",
+          id: "routine-1",
+        },
+      }),
+    );
+
+    findMany.mockClear();
+    await listSchedulesFromTool(deps, { spaceId: "ws-1", botId: "bot-1", userId: "user-1" });
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { spaceId: "ws-1", botId: "bot-1", userId: "user-1" },
+      }),
+    );
+
+    findFirst.mockClear();
+    await cancelScheduleFromTool(deps, {
+      spaceId: "ws-1",
+      botId: "bot-1",
+      userId: "user-1",
+      routineId: "routine-1",
+    });
+    expect(findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { spaceId: "ws-1", botId: "bot-1", userId: "user-1", id: "routine-1" },
       }),
     );
   });

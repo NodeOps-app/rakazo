@@ -1,5 +1,6 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "globalPassThroughEnv": ["COREPACK_ENABLE_DOWNLOAD_PROMPT"],
   "tasks": {
     "generate": {
       "cache": false
@@ -10,13 +11,14 @@
         "BETTER_AUTH_SECRET",
         "DATABASE_URL",
         "ENCRYPTION_KEY",
+        "GIT_SHA",
         "PUBLIC_POSTHOG_HOST",
         "PUBLIC_POSTHOG_KEY"
       ],
       "outputs": ["dist/**", "src/generated/**"]
     },
     "check": {
-      "dependsOn": ["^check", "^generate"]
+      "dependsOn": ["^check", "^generate", "generate"]
     },
     "test": {
       "dependsOn": ["^generate"],

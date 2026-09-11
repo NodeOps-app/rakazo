@@ -1,15 +1,25 @@
+import { Trans, useLingui } from "@lingui/react/macro";
 import type { Me } from "@rakazo/contracts";
+import {
+  Button,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@rakazo/ui-web";
 import { useEffect, useState } from "react";
 import { desktopBridge } from "../lib/desktop";
 import { rpc } from "../lib/rpc";
 
 export function HostComputerPrompt({ initialMe }: { initialMe?: Me }) {
+  const { t } = useLingui();
   const desktop = desktopBridge();
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const mac = desktop?.platform === "darwin";
-  const hostLabel = mac ? "this Mac" : "this computer";
+  const hostLabel = mac ? t`this Mac` : t`this computer`;
 
   useEffect(() => {
     if (!desktop) return;
@@ -34,46 +44,55 @@ export function HostComputerPrompt({ initialMe }: { initialMe?: Me }) {
       await rpc.deployment.update({ computerHost });
       setOpen(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not save that choice");
+      setError(err instanceof Error ? err.message : t`Could not save that choice`);
     } finally {
       setPending(false);
     }
   }
 
+  // The choice is required, so the dialog stays open until one is saved.
   return (
-    <div className="absolute inset-0 z-40 grid place-items-center bg-[#050506]/80 px-6">
-      <div className="w-[440px] rounded-[20px] border border-[#26262A] bg-[#121214] p-6">
-        <h2 className="text-[22px] font-medium text-[#F1F1F2]">Where should bots run?</h2>
-        <p className="mt-2 text-[14px] leading-relaxed text-[#85858A]">
-          Docker is the default: bots use a shared Team Computer.
-          {mac
-            ? " macOS will not ask for extra permission if you let bots run on this Mac — they run as you."
-            : ` Your OS will not ask for extra permission if you let bots run on ${hostLabel} — they run as you.`}
-        </p>
-        {error ? <p className="mt-3 text-sm text-[#E65707]">{error}</p> : null}
-        <div className="mt-5 flex flex-col gap-2">
-          <button
-            type="button"
+    <Dialog open>
+      <DialogContent showCloseButton={false} className="rounded-2xl p-6 sm:max-w-[440px]">
+        <DialogHeader>
+          <DialogTitle className="text-[22px]">
+            <Trans>Where should bots run?</Trans>
+          </DialogTitle>
+          <DialogDescription className="space-y-2 leading-relaxed">
+            <span className="block">
+              <Trans>
+                Docker limits access to your computer for added security. Using {hostLabel} lets
+                bots work with your local files and tools.
+              </Trans>
+            </span>
+            <span className="block text-xs text-muted-foreground/80">
+              <Trans>
+                Local access lets bots run commands without asking. Avoid it on shared or public
+                servers.
+              </Trans>
+            </span>
+          </DialogDescription>
+        </DialogHeader>
+        {error ? <p className="text-sm text-destructive">{error}</p> : null}
+        <div className="flex flex-col gap-2">
+          <Button
+            variant="outline"
+            size="lg"
             disabled={pending}
             onClick={() => void choose("docker")}
-            className="rounded-[11px] bg-[#F1F1EF] px-5 py-2.5 text-[#17171A] disabled:opacity-40"
           >
-            Docker (recommended)
-          </button>
-          <button
-            type="button"
+            <Trans>Docker</Trans>
+          </Button>
+          <Button
+            variant="outline"
+            size="lg"
             disabled={pending}
             onClick={() => void choose("this-mac")}
-            className="rounded-[11px] border border-[#26262A] px-5 py-2.5 text-[#ECECEE] disabled:opacity-40"
           >
-            Use {hostLabel}
-          </button>
+            <Trans>Use {hostLabel}</Trans>
+          </Button>
         </div>
-        <p className="mt-3 text-[12px] leading-relaxed text-[#6C6C70]">
-          {mac ? "This Mac" : "This computer"} runs shell commands with your account, including
-          files in your home folder. Do not turn it on for a shared or public server.
-        </p>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
