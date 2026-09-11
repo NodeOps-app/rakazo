@@ -74,6 +74,7 @@ function attachNovncProxy(server: ViteDevServer | PreviewServer, secret: string,
     }
     const headers = {
       ...safeProxyHeaders(req.headers),
+      "accept-encoding": "identity",
       host: `${target.hostname}:${target.port}`,
     };
     const transport = target.protocol === "https:" ? https : http;
@@ -87,7 +88,19 @@ function attachNovncProxy(server: ViteDevServer | PreviewServer, secret: string,
         ...(target.protocol === "https:" ? { servername: target.hostname } : {}),
       },
       (incoming) => {
-        res.writeHead(incoming.statusCode ?? 502, safeScreenProxyResponseHeaders(incoming.headers));
+        const responseHeaders = safeScreenProxyResponseHeaders(incoming.headers);
+        if (shouldInjectNovncStorageShim(responseHeaders)) {
+          const chunks: Buffer[] = [];
+          incoming.on("data", (chunk: Buffer) => chunks.push(chunk));
+          incoming.on("end", () => {
+            const body = injectNovncStorageShim(Buffer.concat(chunks).toString("utf8"));
+            delete responseHeaders["content-length"];
+            res.writeHead(incoming.statusCode ?? 502, responseHeaders);
+            res.end(body);
+          });
+          return;
+        }
+        res.writeHead(incoming.statusCode ?? 502, responseHeaders);
         incoming.pipe(res);
       },
     );
@@ -184,6 +197,29 @@ function attachNovncProxy(server: ViteDevServer | PreviewServer, secret: string,
     upstream.on("error", () => socket.destroy());
     socket.on("error", () => upstream.destroy());
   });
+}
+
+function shouldInjectNovncStorageShim(headers: http.IncomingHttpHeaders) {
+  if (headers["content-encoding"]) return false;
+  const contentType = String(headers["content-type"] ?? "").toLowerCase();
+  return contentType.includes("text/html") || contentType.includes("application/xhtml+xml");
+}
+
+function injectNovncStorageShim(html: string) {
+  const shim = `<script>
+Object.defineProperty(window, "localStorage", {
+  configurable: true,
+  value: {
+    getItem() { return null; },
+    setItem() {},
+    removeItem() {},
+    clear() {},
+  },
+});
+</script>`;
+  return html.includes("<head>")
+    ? html.replace("<head>", `<head>${shim}`)
+    : html.replace(/<script\b/i, `${shim}<script`);
 }
 
 export default defineConfig(({ mode }) => {
