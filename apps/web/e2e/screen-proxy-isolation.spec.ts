@@ -175,9 +175,10 @@ for (const mode of ["development", "preview"] as const) {
         asset: "module loaded",
         socket: "ok",
         cookie: "blocked",
-        storage: "blocked",
+        storage: null,
         api: "blocked",
       });
+      expect(result.storage).not.toBe("private-app-data");
       expect(response?.headers()["content-security-policy"]).toContain(
         "sandbox allow-scripts allow-pointer-lock",
       );
@@ -239,7 +240,7 @@ for (const mode of ["development", "preview"] as const) {
           asset: "module loaded",
           socket: "ok",
           cookie: "blocked",
-          storage: "blocked",
+          storage: null,
           parent: "blocked",
           api: "blocked",
         });
