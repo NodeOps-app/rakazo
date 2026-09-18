@@ -5,7 +5,7 @@ import { CreateOSSandboxProvider } from "./createos-sandbox.js";
 const context = {
   operationId: "test",
   traceId: "trace",
-  workspaceId: "workspace",
+  spaceId: "workspace",
   userId: "user",
   botId: "bot-a",
   signal: new AbortController().signal,

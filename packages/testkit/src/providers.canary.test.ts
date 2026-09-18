@@ -112,7 +112,7 @@ describeCreateos("live CreateOS canary", () => {
     const ctx = {
       operationId: "createos-canary",
       traceId: "createos-canary",
-      workspaceId: "createos-canary",
+      spaceId: "createos-canary",
       userId: "createos-canary",
       signal: new AbortController().signal,
     };

@@ -27,7 +27,6 @@ import {
   workspacePath,
 } from "./computer-support.js";
 import {
-  PORTABLE_BROWSER_STOP_COMMAND,
   PORTABLE_TRANSFER_BATCH_BYTES,
   shouldSkipPortableWorkspaceFile,
 } from "./computer-workspace.js";
@@ -37,6 +36,7 @@ const DEFAULT_CREATEOS_BASE_URL = "https://api.sb.createos.sh";
 const DEFAULT_CREATEOS_SHAPE = "s-2vcpu-2gb";
 const DEFAULT_CREATEOS_ROOTFS = "desktop:1";
 const TRANSITIONAL_CREATEOS_STATUSES = new Set(["pausing", "resuming"]);
+const PORTABLE_BROWSER_STOP_COMMAND = "pkill -f '[g]oogle-chrome|[c]hromium|[f]irefox' || true";
 const CHROME_CLEAN_EXIT_SCRIPT = `
 import json, os, sys
 profile = sys.argv[1]
