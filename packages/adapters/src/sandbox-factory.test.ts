@@ -36,11 +36,14 @@ describe("createSandboxProvider", () => {
   it("boots without a remote key and keeps computers unavailable", async () => {
     expect(createSandboxProvider("e2b", {}).describe().id).toBe("none");
     expect(createSandboxProvider("daytona", {}).describe().id).toBe("none");
+    expect(createSandboxProvider("createos", {}).describe().id).toBe("none");
     expect(createSandboxProvider("box", {}).describe().id).toBe("none");
     await expect(
       createSandboxProvider("e2b", {}).provision({ botId: "b", homePath: "/tmp" }, ctx),
     ).rejects.toThrow(/E2B_API_KEY/);
-    expect(() => createSandboxProvider("createos", {})).toThrow(/CREATEOS_SANDBOX_API_KEY/);
+    await expect(
+      createSandboxProvider("createos", {}).provision({ botId: "b", homePath: "/tmp" }, ctx),
+    ).rejects.toThrow(/CREATEOS_SANDBOX_API_KEY/);
     expect(
       createSandboxProvider("createos", { createosApiKey: "test-createos-key" }).describe().id,
     ).toBe("createos");

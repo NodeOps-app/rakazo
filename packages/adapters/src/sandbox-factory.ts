@@ -27,7 +27,10 @@ export interface SandboxProviderOptions {
   dataDir?: string;
 }
 
-function missingRemoteKey(provider: "e2b" | "daytona" | "box", envName: string): SandboxProvider {
+function missingRemoteKey(
+  provider: "e2b" | "daytona" | "createos" | "box",
+  envName: string,
+): SandboxProvider {
   return new NoneSandboxProvider(
     `Computers unavailable: ${envName} is required for SANDBOX_PROVIDER=${provider}.`,
   );
@@ -49,8 +52,8 @@ export function createSandboxProvider(kind: string, opts: SandboxProviderOptions
         target: opts.daytonaTarget,
       });
     case "createos":
-      if (!opts.createosApiKey) {
-        throw new Error("CREATEOS_SANDBOX_API_KEY is required for the createos sandbox provider");
+      if (!opts.createosApiKey?.trim()) {
+        return missingRemoteKey("createos", "CREATEOS_SANDBOX_API_KEY");
       }
       return new CreateOSSandboxProvider({
         apiKey: opts.createosApiKey,
