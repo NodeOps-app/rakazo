@@ -7,17 +7,20 @@ import {
   type GroupMember,
   type MessageBlock,
   type MessageReaction,
+  REPLY_QUOTE_MAX_LENGTH,
   type RunStatus,
   type ThreadSnapshot,
 } from "@rakazo/contracts";
 import {
   ACTIVE_RUN_STATUSES,
+  blocksToAgentHistoryText,
   isActive,
   projectMessages,
   resolveGroupTargetBotIds,
   runFailureError,
 } from "@rakazo/core";
 import {
+  answerWaitingRunWithTextInTransaction,
   appendEventInTransaction,
   createGroupRepos,
   createRepos,
@@ -57,10 +60,98 @@ export type ThreadTarget =
       memberBotIds: string[];
     };
 
-const THREAD_MESSAGE_PAGE_SIZE = 100;
-const RUNS_NEEDING_CONTINUE = new Set(["queued"]);
+/**
+ * Flatten text for excerpt comparison. The parent blocks hold markdown
+ * source while the selection captures rendered text, so structural syntax
+ * is normalized away: table delimiters and alignment rows, list markers,
+ * heading and blockquote markers, link targets, emphasis characters.
+ * Semantic punctuation (: + - . ! #) stays on both sides — otherwise
+ * "C++ is fast" would accept a fabricated "C is fast".
+ */
+function flattenForQuoteMatch(text: string, markdownSource = false): string {
+  let fence: { marker: string; quoteDepth: number } | undefined;
+  return text
+    .split("\n")
+    .filter((line) => !/^\s*\|?[\s:|-]+\|?\s*$/.test(line))
+    .map((line) => {
+      const normalized = line
+        .replace(/^\s*(?:>\s*)+/, "")
+        .replace(/^\s*#{1,6}\s+/, "")
+        .replace(/^\s*[-*+•]\s+/, "");
+      if (!markdownSource) return normalized;
+      if (fence) {
+        let boundary = line;
+        const quoteDepth = fence.quoteDepth;
+        for (let depth = 0; depth < quoteDepth; depth++) {
+          const prefix = /^ {0,3}>[ \t]?/.exec(boundary)?.[0];
+          if (!prefix) {
+            fence = undefined;
+            break;
+          }
+          boundary = boundary.slice(prefix.length);
+        }
+        if (fence) {
+          const closing = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(boundary)?.[1];
+          if (closing && closing[0] === fence.marker[0] && closing.length >= fence.marker.length) {
+            fence = undefined;
+          }
+          return normalized;
+        }
+      }
+      let source = line;
+      let quoteDepth = 0;
+      for (
+        let prefix = /^ {0,3}>[ \t]?/.exec(source)?.[0];
+        prefix;
+        prefix = /^ {0,3}>[ \t]?/.exec(source)?.[0]
+      ) {
+        source = source.slice(prefix.length);
+        quoteDepth++;
+      }
+      const match = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(source);
+      const marker = match?.[1];
+      const suffix = match?.[2] ?? "";
+      if (marker && (marker[0] !== "`" || !suffix.includes("`"))) {
+        fence = { marker, quoteDepth };
+        return normalized;
+      }
+      // Test source syntax before stripping headings or other visible containers.
+      return /^ {0,3}\d{1,9}[.)][ \t]+/.test(source)
+        ? normalized.replace(/^ {0,3}\d{1,9}[.)][ \t]+/, "")
+        : normalized;
+    })
+    .join(" ")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .toLowerCase()
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?39;|&apos;/g, "'")
+    .replace(/[‘’]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/[\\`*_~|[\]()•]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
-const STEERABLE_RUN_STATUSES = new Set(["queued", "leased", "running"]);
+function quoteAppearsInBlocks(quote: string, blocks: MessageBlock[]): boolean {
+  const excerpt = flattenForQuoteMatch(quote);
+  if (!excerpt) return false;
+  const parent = blocksToAgentHistoryText(blocks);
+  // Keep existing matches (including visible numbering in code) before removing list syntax.
+  return (
+    flattenForQuoteMatch(parent).includes(excerpt) ||
+    flattenForQuoteMatch(parent, true).includes(excerpt)
+  );
+}
+
+const THREAD_MESSAGE_PAGE_SIZE = 100;
+const RUNS_NEEDING_CONTINUE = new Set(["queued", "waiting_takeover"]);
+
+const STEERABLE_RUN_STATUSES = new Set(["queued", "leased", "running", "waiting_takeover"]);
 
 type MentionTargetInput = string | { kind: "bot" | "group" | "routine" | "connector"; id: string };
 
@@ -587,20 +678,39 @@ export async function sendThreadMessage(
     artifactIds?: string[];
     mentions?: MentionTargetInput[];
     replyToMessageId?: string;
+    replyQuote?: string;
     clientNonce?: string;
   },
 ) {
   const existing = await replayExistingSend(deps, target.threadId, input.clientNonce);
   if (existing) return existing;
+  // The excerpt is rendered text while blocks hold markdown source, so it
+  // can't be substring-verified verbatim — enforce the cap here, then check
+  // the flattened form against the parent inside the transaction.
+  let replyQuote = input.replyQuote?.trim().slice(0, REPLY_QUOTE_MAX_LENGTH) || undefined;
+  if (replyQuote && !input.replyToMessageId) {
+    throw new ORPCError("BAD_REQUEST", { message: "replyQuote requires replyToMessageId." });
+  }
 
   const commit = () =>
     deps.prisma.$transaction(async (tx) => {
       if (input.replyToMessageId) {
         const reply = await tx.message.findFirst({
           where: { id: input.replyToMessageId, threadId: target.threadId },
-          select: { id: true },
+          select: { id: true, blocks: true },
         });
         if (!reply) throw new IsolationError();
+        // Client-supplied excerpts are untrusted: drop a mismatch instead of
+        // failing the send — the reply still lands, just without the quote.
+        if (
+          replyQuote &&
+          !quoteAppearsInBlocks(
+            replyQuote,
+            Array.isArray(reply.blocks) ? (reply.blocks as MessageBlock[]) : [],
+          )
+        ) {
+          replyQuote = undefined;
+        }
       }
 
       if (target.kind === "bot") {
@@ -622,6 +732,7 @@ export async function sendThreadMessage(
           role: "user",
           blocks,
           replyToMessageId: input.replyToMessageId,
+          replyQuote,
           clientNonce: input.clientNonce,
         });
         const activeRuns = await tx.run.findMany({
@@ -632,6 +743,49 @@ export async function sendThreadMessage(
           },
           select: { id: true, taskId: true, status: true },
         });
+        const waitingRuns = activeRuns.filter((run) => run.status === "waiting_input");
+        if (waitingRuns.length) {
+          const answerText = input.text?.trim();
+          if (!answerText) {
+            throw new ORPCError("CONFLICT", {
+              message: "Answer the pending ask first.",
+            });
+          }
+          for (const run of waitingRuns) {
+            const answered = await answerWaitingRunWithTextInTransaction(tx, {
+              spaceId: actor.spaceId,
+              threadId: target.threadId,
+              runId: run.id,
+              answeredByUserId: actor.userId,
+              answer: answerText,
+            });
+            if (!answered) {
+              throw new ORPCError("CONFLICT", {
+                message: "Answer the pending ask first.",
+              });
+            }
+          }
+          const answered = waitingRuns.map((run) => ({ ...run, status: "queued" }));
+          const primary = answered[0];
+          if (!primary) throw new IsolationError();
+          await tx.message.update({ where: { id: message.id }, data: { runId: primary.id } });
+          const event = await appendEventInTransaction(tx, {
+            spaceId: actor.spaceId,
+            threadId: target.threadId,
+            botId: target.botId,
+            type: "thread.message.created",
+            runId: primary.id,
+            payload: {
+              messageId: message.id,
+              role: "user",
+              blocks,
+              runIds: answered.map((run) => run.id),
+              replyToMessageId: input.replyToMessageId,
+              replyQuote,
+            },
+          });
+          return { message, runs: answered, eventSeq: event.seq };
+        }
         if (activeRuns.some((run) => !STEERABLE_RUN_STATUSES.has(run.status))) {
           throw new ORPCError("CONFLICT", {
             message: "Answer the pending ask first.",
@@ -659,6 +813,7 @@ export async function sendThreadMessage(
               role: "user",
               blocks,
               replyToMessageId: input.replyToMessageId,
+              replyQuote,
             },
           });
           return { message, runs: [active], eventSeq: event.seq };
@@ -704,6 +859,7 @@ export async function sendThreadMessage(
             blocks,
             runIds: [run.id],
             replyToMessageId: input.replyToMessageId,
+            replyQuote,
           },
         });
         return { message, runs: [run], eventSeq: event.seq };
@@ -735,6 +891,7 @@ export async function sendThreadMessage(
         role: "user",
         blocks,
         replyToMessageId: input.replyToMessageId,
+        replyQuote,
         clientNonce: input.clientNonce,
       });
       const activeRuns = await tx.run.findMany({
@@ -746,7 +903,33 @@ export async function sendThreadMessage(
         select: { id: true, taskId: true, botId: true, status: true },
       });
       const activeByBotId = new Map<string, (typeof activeRuns)[number]>();
+      const answeredByBotId = new Map<string, Array<(typeof activeRuns)[number]>>();
       for (const run of activeRuns) {
+        if (run.status === "waiting_input") {
+          const answerText = input.text?.trim();
+          if (!answerText) {
+            throw new ORPCError("CONFLICT", {
+              message: "Answer the pending ask first.",
+            });
+          }
+          const answered = await answerWaitingRunWithTextInTransaction(tx, {
+            spaceId: actor.spaceId,
+            threadId: target.threadId,
+            runId: run.id,
+            answeredByUserId: actor.userId,
+            answer: answerText,
+          });
+          if (!answered) {
+            throw new ORPCError("CONFLICT", {
+              message: "Answer the pending ask first.",
+            });
+          }
+          const queuedRun = { ...run, status: "queued" };
+          const queuedForBot = answeredByBotId.get(run.botId);
+          if (queuedForBot) queuedForBot.push(queuedRun);
+          else answeredByBotId.set(run.botId, [queuedRun]);
+          continue;
+        }
         if (!STEERABLE_RUN_STATUSES.has(run.status)) {
           throw new ORPCError("CONFLICT", {
             message: "Answer the pending ask first.",
@@ -756,6 +939,11 @@ export async function sendThreadMessage(
       }
       const runs: Array<{ id: string; taskId: string; botId: string; status: string }> = [];
       for (const botId of targetBotIds) {
+        const answered = answeredByBotId.get(botId);
+        if (answered) {
+          runs.push(...answered);
+          continue;
+        }
         const active = activeByBotId.get(botId);
         if (active) {
           await tx.steeringMessage.create({
@@ -794,7 +982,9 @@ export async function sendThreadMessage(
       if (!eventBotId) throw new IsolationError("Group send did not resolve a target");
       if (firstRun) {
         await tx.message.update({ where: { id: message.id }, data: { runId: firstRun.id } });
-        const createdRuns = runs.filter((run) => !activeByBotId.has(run.botId));
+        const createdRuns = runs.filter(
+          (run) => !activeByBotId.has(run.botId) && !answeredByBotId.has(run.botId),
+        );
         if (createdRuns.length) {
           await cancelSupersededQueuedRuns(tx, {
             threadId: target.threadId,
@@ -816,6 +1006,7 @@ export async function sendThreadMessage(
           blocks,
           runIds: runs.map((run) => run.id),
           replyToMessageId: input.replyToMessageId,
+          replyQuote,
         },
       });
       return { message, runs, eventSeq: event.seq };

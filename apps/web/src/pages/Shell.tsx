@@ -76,6 +76,7 @@ import {
   Popover,
   PopoverContent,
   PopoverTrigger,
+  resolvePersonaColorDef,
 } from "@rakazo/ui-web";
 import {
   ArrowDown,
@@ -86,6 +87,7 @@ import {
   Clock,
   Copy,
   Gauge,
+  LayoutGrid,
   Lock,
   LogOut,
   Maximize2,
@@ -96,6 +98,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Paperclip,
+  Pencil,
   Plus,
   Puzzle,
   Reply,
@@ -103,6 +106,7 @@ import {
   Settings,
   Smile,
   Square,
+  TextQuote,
   Trash2,
   X,
 } from "lucide-react";
@@ -122,6 +126,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ArtifactFileCard } from "../components/ArtifactFileCard";
 import { AskCard } from "../components/AskCard";
@@ -164,6 +169,7 @@ import {
   revokePendingAttachmentPreviews,
 } from "../lib/pending-attachments";
 import { markAfterPaint, markOnce } from "../lib/performance";
+import { quoteDraftForSelection } from "../lib/quote-selection";
 import { clearSpaceSelection, rpc, selectedSpaceId, selectSpace } from "../lib/rpc";
 import { readSeenRunErrorIds, rememberSeenRunErrorId } from "../lib/run-error-storage";
 import { sharedInflight } from "../lib/shared-inflight";
@@ -215,6 +221,7 @@ import {
   NewBotSectionDialog,
   NewSpaceDialog,
   PickerInfoDialog,
+  RenameBotSectionDialog,
 } from "./shell/dialogs";
 import {
   AppConnectCard,
@@ -349,6 +356,7 @@ export function ShellPage() {
   const snapshotRef = useRef<ThreadSnapshot | null>(null);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [replyTarget, setReplyTarget] = useState<ThreadMessage | null>(null);
+  const [replyQuote, setReplyQuote] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
@@ -503,6 +511,22 @@ export function ShellPage() {
   const [newSectionTarget, setNewSectionTarget] = useState<
     { kind: "bot"; chat: Bot } | { kind: "group"; chat: Group } | null
   >(null);
+  const [renameSectionTarget, setRenameSectionTarget] = useState<{
+    section: BotSection;
+    spaceId: string;
+  } | null>(null);
+  const [sectionMenu, setSectionMenu] = useState<{
+    section: BotSection;
+    spaceId: string;
+    position: ContextMenuPosition;
+  } | null>(null);
+  const sectionMenuAnchor = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (sectionMenu || !sectionMenuAnchor.current) return;
+    sectionMenuAnchor.current.focus();
+    sectionMenuAnchor.current = null;
+  }, [sectionMenu]);
+  const closeSectionMenu = useCallback(() => setSectionMenu(null), []);
   const [booting, setBooting] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [initialBotsLoaded, setInitialBotsLoaded] = useState(false);
@@ -516,6 +540,11 @@ export function ShellPage() {
   const [routineError, setRoutineError] = useState<string | null>(null);
   const [screenUrl, setScreenUrl] = useState<string | null>(null);
   const [computerOpen, setComputerOpen] = useState(false);
+  const [computerBotId, setComputerBotId] = useState<string | undefined>();
+  const computerOpenRef = useRef(false);
+  const computerBotIdRef = useRef<string | undefined>(undefined);
+  const computerBootEpoch = useRef(0);
+  const openComputerRef = useRef<(botId?: string) => Promise<void>>(async () => {});
   const [computerViewport, setComputerViewport] = useState<{
     height: number;
     offsetTop: number;
@@ -602,6 +631,10 @@ export function ShellPage() {
 
   const inGroup = Boolean(groupId);
   const active = inGroup ? undefined : (bots.find((b) => b.id === botId) ?? bots[0]);
+  const computerBot =
+    (computerBotId ? bots.find((bot) => bot.id === computerBotId) : undefined) ?? active;
+  computerOpenRef.current = computerOpen;
+  computerBotIdRef.current = computerBotId ?? active?.id;
   const activeGroup = groups.find((group) => group.id === groupId);
   const activePendingAttachments = useMemo(
     () => attachmentsForThread(pendingAttachments, inGroup ? groupId : active?.id),
@@ -828,7 +861,7 @@ export function ShellPage() {
       expandedHistoryThread.current === snap.threadId,
     );
     commitSnapshot(reconciled.snapshot);
-    commitComputer(null);
+    if (!computerOpenRef.current) commitComputer(null);
     setRoutines([]);
     setRoutinesBotId(null);
     // Keep the search-jump viewport; expandedHistoryThread merge still accepts live messages.
@@ -905,7 +938,9 @@ export function ShellPage() {
     return loadComputerScreen({
       load: () => rpc.computer.screenUrl({ botId: id }),
       isCurrent: () =>
-        request === screenRequest.current && activeBotId.current === id && computerVisible.current,
+        request === screenRequest.current &&
+        (activeBotId.current === id || computerBotIdRef.current === id) &&
+        computerVisible.current,
       commit: (screen) => {
         setScreenUrl(screen.url);
         setComputerError(screen.error);
@@ -1198,6 +1233,7 @@ export function ShellPage() {
         } else if (
           event.type === "bot.spawned" ||
           event.type === "bot.deleted" ||
+          event.type === "bot.updated" ||
           event.type === "run.started" ||
           isRunTerminalEvent(event) ||
           event.type === "thread.cleared"
@@ -1276,7 +1312,16 @@ export function ShellPage() {
       currentSnapshot: () => snapshotRef.current,
       subscribe: (cursor) => rpc.threads.subscribe({ groupId, cursor }, { signal: abort.signal }),
       applyEvent: (event) =>
-        applyThreadEvent(event, commitSnapshot, commitComputer, snapshotRef, computerRef),
+        applyThreadEvent(
+          event,
+          commitSnapshot,
+          (next) => {
+            if (isComputerStatusEvent(event) && event.botId !== computerBotIdRef.current) return;
+            commitComputer(next);
+          },
+          snapshotRef,
+          computerRef,
+        ),
       onEvent: (event, initial) => {
         const eventBot = botsRef.current.find((bot) => bot.id === event.botId);
         notifyBrowserForEvent(
@@ -1292,7 +1337,11 @@ export function ShellPage() {
           readVisibleGroups.current.delete(groupId);
           markVisibleGroupRead();
         }
-        if (event.type === "run.started" || isRunTerminalEvent(event)) {
+        if (
+          event.type === "run.started" ||
+          event.type === "bot.updated" ||
+          isRunTerminalEvent(event)
+        ) {
           void refreshBots().catch(() => undefined);
         }
         if (isRunTerminalEvent(event) || event.type === "run.waiting_input") {
@@ -1345,6 +1394,7 @@ export function ShellPage() {
         space.botSections,
       ).map((group, index) => ({
         ...group,
+        sectionId: group.key.startsWith("section:") ? group.key.slice("section:".length) : null,
         key: showSpaceNames ? `space:${space.id}:${group.key}` : group.key,
         title: showSpaceNames
           ? group.title
@@ -1366,6 +1416,7 @@ export function ShellPage() {
           key: `space:${space.id}:empty`,
           title: space.name,
           bots: [],
+          sectionId: null,
           showLock: true,
           emptySpaceId: space.id,
           spaceId: space.id,
@@ -1609,6 +1660,11 @@ export function ShellPage() {
     replyTarget && activeSnapshot?.messages.some((message) => message.id === replyTarget.id)
       ? replyTarget
       : null;
+  const activeReplyQuote = activeReplyTarget ? replyQuote : null;
+  const clearReply = useCallback(() => {
+    setReplyTarget(null);
+    setReplyQuote(null);
+  }, []);
   const currentRuns = activeThreadRuns(activeSnapshot);
   const answerableAskMessageId = latestAnswerableAskMessageId(activeSnapshot);
   const workingRuns = currentRuns.filter((run) =>
@@ -1938,7 +1994,7 @@ export function ShellPage() {
         }
         if (!plan.shouldSend) {
           dropDelayedSetup();
-          setReplyTarget(null);
+          clearReply();
           revokePendingAttachmentPreviews(attachments);
           setPendingAttachments((current) =>
             current.filter((attachment) => attachment.threadKey !== originThreadKey),
@@ -1978,6 +2034,7 @@ export function ShellPage() {
             mentions: plan.mentionPayload.length ? plan.mentionPayload : undefined,
             artifactIds: artifactIds.length ? artifactIds : undefined,
             replyToMessageId: reroutedToGroup ? undefined : activeReplyTarget?.id,
+            replyQuote: reroutedToGroup ? undefined : (activeReplyQuote ?? undefined),
           });
         } else if (botTarget) {
           const sent = await rpc.threads.send({
@@ -1987,6 +2044,7 @@ export function ShellPage() {
             mentions: plan.mentionPayload.length ? plan.mentionPayload : undefined,
             artifactIds: artifactIds.length ? artifactIds : undefined,
             replyToMessageId: activeReplyTarget?.id,
+            replyQuote: activeReplyQuote ?? undefined,
           });
           if (activeBotId.current === botTarget) {
             updateSnapshot((current) =>
@@ -2003,7 +2061,7 @@ export function ShellPage() {
           }
         }
         dropDelayedSetup();
-        setReplyTarget(null);
+        clearReply();
         revokePendingAttachmentPreviews(attachments);
         setPendingAttachments((current) =>
           current.filter((attachment) => attachment.threadKey !== originThreadKey),
@@ -2032,6 +2090,8 @@ export function ShellPage() {
     },
     [
       activeReplyTarget?.id,
+      activeReplyQuote,
+      clearReply,
       flushPendingBrowserNotifications,
       navigate,
       pendingAttachments,
@@ -2233,30 +2293,60 @@ export function ShellPage() {
   }
 
   async function bootComputer({
+    botId: targetBotId,
     takeControl,
     overlay,
     force = false,
   }: {
+    botId: string;
     takeControl: boolean;
     overlay: boolean;
     force?: boolean;
   }) {
-    if (!active) return;
-    const needsBoot = force || computer?.state !== "running" || !screenUrl;
+    const epoch = ++computerBootEpoch.current;
+    const stillThisBoot = () => computerBootEpoch.current === epoch;
+    const stillThisBot = () =>
+      computerBotIdRef.current === targetBotId || activeBotId.current === targetBotId;
+    const cached = computerCacheRef.current.get(targetBotId);
+    const targetComputer = computer?.botId === targetBotId ? computer : (cached?.computer ?? null);
+    const targetScreen = computer?.botId === targetBotId ? screenUrl : (cached?.screenUrl ?? null);
+    const needsBoot = force || targetComputer?.state !== "running" || !targetScreen;
     if (overlay && needsBoot) setBooting(true);
     setComputerError(null);
     setComputerErrorFromScreen(false);
     try {
-      if (needsBoot) await rpc.computer.boot({ botId: active.id });
-      if (takeControl) await rpc.computer.takeover({ botId: active.id });
-      await refreshThread(active.id);
+      if (needsBoot) {
+        const status = await rpc.computer.boot({ botId: targetBotId });
+        if (!stillThisBoot() || !stillThisBot()) return;
+        commitComputer(status);
+        cacheComputerFor(targetBotId, { computer: status });
+      }
+      if (takeControl) {
+        await rpc.computer.takeover({ botId: targetBotId });
+        if (!stillThisBoot() || !stillThisBot()) return;
+      }
+      await refreshComputerFor(targetBotId);
     } catch (error) {
+      if (!stillThisBoot() || !stillThisBot()) return;
       setComputerError(error instanceof Error ? error.message : t`Could not take control`);
       setComputerErrorFromScreen(false);
       throw error;
     } finally {
-      setBooting(false);
+      if (stillThisBoot()) setBooting(false);
     }
+  }
+
+  async function refreshComputerFor(targetBotId: string) {
+    if (activeBotId.current === targetBotId) {
+      await refreshThread(targetBotId);
+      return;
+    }
+    if (computerBotIdRef.current !== targetBotId) return;
+    const status = await rpc.computer.status({ botId: targetBotId });
+    if (computerBotIdRef.current !== targetBotId) return;
+    commitComputer(status);
+    cacheComputerFor(targetBotId, { computer: status });
+    await refreshComputerScreen(targetBotId);
   }
 
   useEffect(() => {
@@ -2284,6 +2374,7 @@ export function ShellPage() {
       autoBooted.current = botId;
       if (!computerPanelAutoUsesBoot(action)) return;
       await bootComputer({
+        botId,
         takeControl: false,
         overlay: action === "boot",
         force: true,
@@ -2298,6 +2389,7 @@ export function ShellPage() {
     setComputerOpen(false);
     setComputerError(null);
     setComputerErrorFromScreen(false);
+    setComputerBotId(active?.id);
   }, [active?.id]);
 
   useEffect(() => {
@@ -2338,10 +2430,10 @@ export function ShellPage() {
       revokePendingAttachmentPreviews(stale);
       return attachmentsForThread(current, threadKey);
     });
-    setReplyTarget(null);
+    clearReply();
     setAttachmentNotice(null);
     setSendError(null);
-  }, [active?.id, groupId, inGroup]);
+  }, [active?.id, clearReply, groupId, inGroup]);
 
   useEffect(() => {
     if (!computerOpen) return;
@@ -2363,40 +2455,66 @@ export function ShellPage() {
   }, []);
 
   useEffect(() => {
-    if ((panel !== "computer" && !computerOpen) || !active || computer?.state !== "running") return;
-    const ping = () => void rpc.computer.heartbeat({ botId: active.id }).catch(() => undefined);
+    const heartbeatBotId = computerBot?.id ?? active?.id;
+    if ((panel !== "computer" && !computerOpen) || !heartbeatBotId || computer?.state !== "running")
+      return;
+    const ping = () =>
+      void rpc.computer.heartbeat({ botId: heartbeatBotId }).catch(() => undefined);
     ping();
     const timer = window.setInterval(ping, 60_000);
     return () => window.clearInterval(timer);
-  }, [panel, computerOpen, active?.id, computer?.state]);
+  }, [panel, computerOpen, computerBot?.id, active?.id, computer?.state]);
 
-  async function openComputer() {
-    if (!active) return;
-    const needsTakeover = !userHoldsComputerControl(computer, active.id);
-    const blocked = computerTakeoverBlocked(computer, snapshot?.run?.status);
+  async function openComputer(botId?: string) {
+    const id = botId ?? active?.id;
+    if (!id) return;
+    const bot = botsRef.current.find((candidate) => candidate.id === id);
+    if (!bot) return;
+    computerBotIdRef.current = id;
+    setComputerBotId(id);
+    const cached = computerCacheRef.current.get(id);
+    const targetComputer = computer?.botId === id ? computer : (cached?.computer ?? null);
+    const targetScreen = computer?.botId === id ? screenUrl : (cached?.screenUrl ?? null);
+    if (computer?.botId !== id) {
+      commitComputer(targetComputer);
+      setScreenUrl(targetScreen);
+    }
+    setComputerOpen(true);
+    computerVisible.current = true;
+    const needsTakeover = !userHoldsComputerControl(targetComputer, id);
+    const blocked = computerTakeoverBlocked(targetComputer, snapshot?.run?.status);
     try {
       await bootComputer({
+        botId: id,
         takeControl: needsTakeover && !blocked,
-        overlay: (needsTakeover && !blocked) || computer?.state !== "running",
-        force: computer?.state !== "running",
+        overlay: (needsTakeover && !blocked) || targetComputer?.state !== "running",
+        force: targetComputer?.state !== "running",
       });
-      setComputerOpen(true);
     } catch {
       // computerError already set in bootComputer
     }
   }
+  openComputerRef.current = openComputer;
+  const onOpenComputer = useCallback((botId?: string) => {
+    void openComputerRef.current(botId);
+  }, []);
 
   const releaseComputer = useCallback(
     async (reason?: ComputerReleaseReason) => {
-      const botId = activeBotId.current;
+      const botId = computerBotIdRef.current ?? activeBotId.current;
       if (!botId) return;
       try {
         await rpc.computer.release({ botId, reason });
-        if (activeBotId.current !== botId) return;
+        if (computerBotIdRef.current !== botId && activeBotId.current !== botId) return;
         setComputerOpen(false);
-        await refreshThreadRef.current(botId).catch(() => undefined);
+        const groupId = activeGroupId.current;
+        if (groupId) {
+          await refreshGroupThreadRef.current(groupId).catch(() => undefined);
+        } else {
+          await refreshThreadRef.current(botId).catch(() => undefined);
+        }
       } catch {
-        if (activeBotId.current !== botId) return;
+        if (computerBotIdRef.current !== botId && activeBotId.current !== botId) return;
         setComputerError(t`Could not continue`);
         setComputerErrorFromScreen(false);
       }
@@ -2416,7 +2534,7 @@ export function ShellPage() {
   }
 
   const embeddedScreenUrl = embeddableScreenUrl(screenUrl);
-  const hasControl = userHoldsComputerControl(computer, active?.id);
+  const hasControl = userHoldsComputerControl(computer, computerBot?.id);
   const hideScreenLoadError = computerErrorFromScreen && Boolean(embeddedScreenUrl);
   const computerScreenError =
     computerError && !hideScreenLoadError ? (
@@ -2425,7 +2543,7 @@ export function ShellPage() {
         <Button
           variant="outline"
           size="sm"
-          onClick={() => active && void refreshComputerScreen(active.id)}
+          onClick={() => computerBot && void refreshComputerScreen(computerBot.id)}
         >
           <Trans>Retry screen</Trans>
         </Button>
@@ -2609,7 +2727,7 @@ export function ShellPage() {
         </div>
         <InputGroup
           data-testid="sidebar-search"
-          className="mx-2.5 mb-3 w-auto rounded-xl bg-card dark:bg-input"
+          className="mx-2.5 mb-3 w-auto rounded-xl bg-card dark:bg-input border border-border text-muted-foreground focus-within:border-ring"
         >
           <InputGroupAddon>
             <Search size={16} strokeWidth={1.8} aria-hidden="true" />
@@ -2648,10 +2766,10 @@ export function ShellPage() {
                 return (
                   <div key={group.key} data-sidebar-group={group.key}>
                     {group.title ? (
-                      <div className="flex items-center pt-2">
+                      <div className="flex items-center pt-3 pb-0.5">
                         <button
                           type="button"
-                          className="flex min-w-0 flex-1 items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-[12.5px] font-medium text-muted-foreground/80 hover:bg-sidebar-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring"
+                          className="flex min-w-0 flex-1 items-center justify-between gap-2 rounded-lg px-2.5 py-1 text-[11px] font-semibold tracking-wider uppercase text-muted-foreground/60 hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring"
                           onClick={() => {
                             if (group.emptySpaceId) {
                               openSpaceChat(group.emptySpaceId, "/onboarding");
@@ -2660,16 +2778,37 @@ export function ShellPage() {
                             toggleSidebarSection(group.key);
                           }}
                           onContextMenu={
-                            group.canDeleteSpace
+                            group.sectionId
                               ? (event) => {
                                   event.preventDefault();
-                                  spaceMenuAnchor.current = event.currentTarget;
-                                  setSpaceMenu({
-                                    id: group.spaceId,
+                                  // Prefer section rename over delete-space when both apply;
+                                  // the dedicated space-actions button still opens the space menu.
+                                  const sections =
+                                    group.spaceId === bootstrapMe?.spaceId
+                                      ? botSections
+                                      : (spaces.find((space) => space.id === group.spaceId)
+                                          ?.botSections ?? []);
+                                  const section = sections.find(
+                                    (item) => item.id === group.sectionId,
+                                  );
+                                  if (!section) return;
+                                  sectionMenuAnchor.current = event.currentTarget;
+                                  setSectionMenu({
+                                    section,
+                                    spaceId: group.spaceId,
                                     position: { x: event.clientX, y: event.clientY },
                                   });
                                 }
-                              : undefined
+                              : group.canDeleteSpace
+                                ? (event) => {
+                                    event.preventDefault();
+                                    spaceMenuAnchor.current = event.currentTarget;
+                                    setSpaceMenu({
+                                      id: group.spaceId,
+                                      position: { x: event.clientX, y: event.clientY },
+                                    });
+                                  }
+                                : undefined
                           }
                           aria-expanded={group.emptySpaceId ? undefined : !collapsed}
                           aria-label={
@@ -2782,7 +2921,7 @@ export function ShellPage() {
                               position: { x: event.clientX, y: event.clientY },
                             });
                           }}
-                          className={`flex w-full gap-3 rounded-xl px-2.5 py-[11px] text-start ${
+                          className={`flex w-full items-center gap-3 rounded-xl px-2.5 py-[10px] text-start ${
                             item.kind === "bot" ? "cursor-grab active:cursor-grabbing" : ""
                           } ${
                             (item.kind === "bot" && !inGroup && active?.id === item.chat.id) ||
@@ -2813,69 +2952,54 @@ export function ShellPage() {
                             />
                           )}
                           <div className="min-w-0 flex-1">
-                            <div className="flex items-baseline justify-between gap-2">
-                              <span
-                                dir="auto"
-                                data-roster-bot-name={item.kind === "bot" ? "" : undefined}
-                                className={`truncate text-[15px] text-foreground ${
-                                  item.chat.unread ? "font-semibold" : "font-medium"
-                                }`}
-                              >
-                                {item.chat.name}
+                            <div className="flex items-center justify-between gap-1.5">
+                              <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
+                                <span
+                                  dir="auto"
+                                  data-roster-bot-name={item.kind === "bot" ? "" : undefined}
+                                  className={`truncate text-[14px] text-foreground ${
+                                    item.chat.unread ? "font-semibold" : "font-medium"
+                                  }`}
+                                >
+                                  {item.chat.name}
+                                </span>
+                                {item.kind === "bot" && item.chat.title ? (
+                                  <span className="max-w-[130px] shrink-0 truncate rounded-md border border-border bg-muted px-2 py-0.5 text-[11px] font-normal text-muted-foreground">
+                                    {item.chat.title}
+                                  </span>
+                                ) : null}
                                 {item.chat.unread ? (
                                   <span className="sr-only">
                                     <Trans> (unread)</Trans>
                                   </span>
                                 ) : null}
-                              </span>
-                              <span className="flex shrink-0 items-center gap-1.5 text-[12.5px] text-muted-foreground/80">
-                                {item.kind === "bot" && item.chat.status !== "idle"
-                                  ? item.chat.status
-                                  : ""}
+                              </div>
+                              <div className="flex shrink-0 items-center gap-1.5">
+                                <span className="text-[11.5px] text-muted-foreground/60 tabular-nums">
+                                  {formatRosterTime(item.chat.updatedAt)}
+                                </span>
                                 {item.chat.unread ? (
                                   <span
                                     aria-hidden="true"
                                     className="inline-block h-2 w-2 rounded-full bg-foreground"
                                   />
                                 ) : null}
-                              </span>
-                            </div>
-                            {item.kind === "bot" && item.chat.title ? (
-                              <>
-                                <div
-                                  dir="auto"
-                                  className={`mt-0.5 truncate text-[13.5px] ${
-                                    item.chat.unread
-                                      ? "font-medium text-foreground/75"
-                                      : "text-muted-foreground"
-                                  }`}
-                                >
-                                  {item.chat.title}
-                                </div>
-                                {item.chat.preview ? (
-                                  <div
-                                    dir="auto"
-                                    className="truncate text-[12.5px] text-muted-foreground/80"
-                                  >
-                                    {item.chat.preview}
-                                  </div>
-                                ) : null}
-                              </>
-                            ) : (
-                              <div
-                                dir="auto"
-                                className={`mt-0.5 truncate text-[13.5px] ${
-                                  item.chat.unread
-                                    ? "font-medium text-foreground/75"
-                                    : "text-muted-foreground"
-                                }`}
-                              >
-                                {item.kind === "bot"
-                                  ? item.chat.preview
-                                  : item.chat.preview ||
-                                    item.chat.members.map((member) => member.name).join(", ")}
                               </div>
-                            )}
+                            </div>
+                            <div
+                              dir="auto"
+                              className={`mt-0.5 truncate text-[12.5px] ${
+                                item.chat.unread
+                                  ? "font-medium text-foreground/75"
+                                  : "text-muted-foreground/60"
+                              }`}
+                            >
+                              {item.kind === "bot"
+                                ? item.chat.preview ||
+                                  (item.chat.status !== "idle" ? item.chat.status : "")
+                                : item.chat.preview ||
+                                  item.chat.members.map((member) => member.name).join(", ")}
+                            </div>
                           </div>
                         </button>
                       ))}
@@ -2972,12 +3096,12 @@ export function ShellPage() {
         <button
           type="button"
           onClick={() => setPluginsOpen(true)}
-          className="mx-3 mb-1 flex items-center gap-3 rounded-[11px] px-2.5 py-2 hover:bg-sidebar-accent"
+          className="mx-3 mb-1 flex items-center gap-3 rounded-xl px-2.5 py-2 hover:bg-sidebar-accent"
         >
-          <span className="grid h-[30px] w-[30px] place-items-center rounded-full bg-muted text-foreground/75">
-            <Puzzle size={15} strokeWidth={1.7} />
+          <span className="grid h-[30px] w-[30px] place-items-center rounded-lg bg-accent text-foreground/80">
+            <LayoutGrid size={15} strokeWidth={1.8} />
           </span>
-          <span className="text-[14.5px] text-foreground/90">
+          <span className="text-[14px] font-medium text-foreground/90">
             <Trans>Integrations</Trans>
           </span>
         </button>
@@ -3156,7 +3280,7 @@ export function ShellPage() {
                     void refreshThread(active.id).catch(() => undefined);
                   }
                 }}
-                data-active={panel ? "" : undefined}
+                data-active={panel === "computer" ? "" : undefined}
                 className="app-no-drag grid h-[30px] w-[34px] place-items-center rounded-[9px] hover:bg-accent data-active:bg-accent"
               >
                 <Monitor size={18} strokeWidth={1.6} className="text-foreground/75" />
@@ -3185,7 +3309,14 @@ export function ShellPage() {
             onLoadOlder={loadOlder}
             onOpenBot={openBot}
             onAnswer={answerMessage}
-            onReply={setReplyTarget}
+            onReply={(message) => {
+              setReplyTarget(message);
+              setReplyQuote(null);
+            }}
+            onQuote={(message, quote) => {
+              setReplyTarget(message);
+              setReplyQuote(quote);
+            }}
             onReact={reactToMessage}
             onJumpToMessage={jumpToReplyMessage}
             onOpenPeerMessages={(peer) => {
@@ -3199,6 +3330,7 @@ export function ShellPage() {
             voiceReady={Boolean(voiceStatus?.ready)}
             speakingMessageId={speakingMessageId}
             onSpeak={speakMessage}
+            onOpenComputer={onOpenComputer}
           />
         )}
         {recordingSkill ? (
@@ -3237,8 +3369,9 @@ export function ShellPage() {
                 : undefined
             }
             replyTarget={activeReplyTarget}
+            replyQuote={activeReplyQuote}
             replyTargetName={replyTargetName}
-            onClearReply={() => setReplyTarget(null)}
+            onClearReply={clearReply}
             mentionTargets={composerMentionTargets}
             agentSkills={agentSkills}
             onSlashOpen={refreshAgentSkills}
@@ -3690,6 +3823,12 @@ export function ShellPage() {
               );
               setBotMenu(null);
             }}
+            onRenameSection={(sectionId) => {
+              const section = botSections.find((item) => item.id === sectionId);
+              const spaceId = bootstrapMe?.spaceId;
+              if (section && spaceId) setRenameSectionTarget({ section, spaceId });
+              setBotMenu(null);
+            }}
             onEdit={() => {
               navigate(contextBot ? `/app/${contextBot.id}` : `/app/g/${contextGroup!.id}`);
               setPanel(contextBot ? "settings" : "group-settings");
@@ -3835,6 +3974,64 @@ export function ShellPage() {
               await refreshBots();
             }}
           />
+        ) : null}
+
+        {renameSectionTarget ? (
+          <RenameBotSectionDialog
+            section={renameSectionTarget.section}
+            onCancel={() => setRenameSectionTarget(null)}
+            onConfirm={async (name) => {
+              await rpc.botSections.update(
+                {
+                  sectionId: renameSectionTarget.section.id,
+                  name,
+                },
+                { context: { spaceId: renameSectionTarget.spaceId } },
+              );
+              setRenameSectionTarget(null);
+              await refreshBots();
+            }}
+          />
+        ) : null}
+
+        {sectionMenu ? (
+          <DropdownMenu
+            open
+            onOpenChange={(open) => {
+              if (!open) closeSectionMenu();
+            }}
+          >
+            <DropdownMenuTrigger
+              render={
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  aria-hidden
+                  className="fixed size-0 p-0 opacity-0"
+                  style={{ left: sectionMenu.position.x, top: sectionMenu.position.y }}
+                />
+              }
+            />
+            <DropdownMenuContent
+              aria-label={t`Actions for ${sectionMenu.section.name}`}
+              align="start"
+              sideOffset={0}
+              className="w-[220px]"
+            >
+              <DropdownMenuItem
+                onClick={() => {
+                  setRenameSectionTarget({
+                    section: sectionMenu.section,
+                    spaceId: sectionMenu.spaceId,
+                  });
+                  setSectionMenu(null);
+                }}
+              >
+                <Pencil />
+                {t`Rename section`}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         ) : null}
 
         <CommandPalette
@@ -3996,13 +4193,13 @@ export function ShellPage() {
       {booting ? (
         <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-[22px] bg-background/95">
           <div className="text-[19px] font-medium text-foreground">
-            <Trans>Booting up {active?.name}’s computer</Trans>
+            <Trans>Booting up {computerBot?.name ?? active?.name}’s computer</Trans>
           </div>
           <div className="h-[5px] w-[min(420px,70%)] overflow-hidden rounded-full bg-accent">
             <div className="h-full w-2/3 rounded-full bg-primary" />
           </div>
         </div>
-      ) : computerOpen && active ? (
+      ) : computerOpen && computerBot ? (
         <div className="fixed inset-0 z-30 bg-background">
           <div
             data-testid="computer-viewport"
@@ -4018,10 +4215,10 @@ export function ShellPage() {
             >
               <div className="flex min-w-0 flex-1 items-center gap-3">
                 <BotAvatar
-                  color={active.color}
-                  identity={active.id}
+                  color={computerBot.color}
+                  identity={computerBot.id}
                   size={28}
-                  status={active.status}
+                  status={computerBot.status}
                 />
                 {recordingSkill ? (
                   <TeachRecordingChrome
@@ -4032,7 +4229,7 @@ export function ShellPage() {
                   />
                 ) : (
                   <span className="truncate text-[15.5px] font-medium text-foreground" dir="auto">
-                    {computerLabel(computer?.mode, active.name)}
+                    {computerLabel(computer?.mode, computerBot.name)}
                   </span>
                 )}
                 {!recordingSkill && hasControl ? (
@@ -4069,21 +4266,21 @@ export function ShellPage() {
                     onRelease={releaseComputer}
                   />
                 ) : null}
-                {active && !recordingSkill ? (
+                {computerBot && !recordingSkill ? (
                   <TeachComputerOverlayControl
-                    key={active.id}
-                    botId={active.id}
+                    key={computerBot.id}
+                    botId={computerBot.id}
                     computer={computer}
                     busy={teachBusy}
                     onRefresh={refreshActiveTeaching}
                   />
                 ) : null}
-                {active && !recordingSkill ? (
+                {computerBot && !recordingSkill ? (
                   <ComputerMaintenanceActions
-                    botId={active.id}
+                    botId={computerBot.id}
                     computer={computer}
                     onChanged={async () => {
-                      await refreshThread(active.id);
+                      await refreshComputerFor(computerBot.id);
                     }}
                   />
                 ) : null}
@@ -4121,9 +4318,9 @@ export function ShellPage() {
                       pointerEvents: recordingSkill || !hasControl ? "none" : "auto",
                     }}
                   />
-                  {active ? (
+                  {computerBot ? (
                     <TeachCaptureOverlay
-                      botId={active.id}
+                      botId={computerBot.id}
                       skill={recordingSkill}
                       enabled={Boolean(recordingSkill)}
                       screenWidth={computer?.screenWidth}
@@ -4136,7 +4333,7 @@ export function ShellPage() {
                   {computerScreenError ??
                     (computer?.state === "suspended"
                       ? t`Computer is asleep`
-                      : computerLabel(computer?.mode, active.name))}
+                      : computerLabel(computer?.mode, computerBot.name))}
                 </div>
               )}
             </div>
@@ -4146,9 +4343,7 @@ export function ShellPage() {
     </div>
   );
 
-  return (
-    <AvatarStyleProvider value={bootstrapMe?.avatarStyle ?? "robot"}>{shell}</AvatarStyleProvider>
-  );
+  return <AvatarStyleProvider value="organic">{shell}</AvatarStyleProvider>;
 }
 
 const Transcript = memo(function Transcript({
@@ -4164,6 +4359,7 @@ const Transcript = memo(function Transcript({
   onOpenBot,
   onAnswer,
   onReply,
+  onQuote,
   onReact,
   onJumpToMessage,
   onOpenPeerMessages,
@@ -4175,6 +4371,7 @@ const Transcript = memo(function Transcript({
   voiceReady,
   speakingMessageId,
   onSpeak,
+  onOpenComputer,
 }: {
   scrollRef: RefObject<HTMLDivElement | null>;
   artifactTarget: ArtifactTarget;
@@ -4188,6 +4385,7 @@ const Transcript = memo(function Transcript({
   onOpenBot: (botId: string) => void;
   onAnswer: (message: ThreadMessage, text: string) => Promise<void>;
   onReply: (message: ThreadMessage) => void;
+  onQuote: (message: ThreadMessage, quote: string) => void;
   onReact: (message: ThreadMessage, reaction: MessageReaction) => Promise<void>;
   onJumpToMessage: (messageId: string) => void;
   onOpenPeerMessages: (peer: { peerBotId: string; peerBotName: string }) => void;
@@ -4199,6 +4397,7 @@ const Transcript = memo(function Transcript({
   voiceReady: boolean;
   speakingMessageId: string | null;
   onSpeak: (message: ThreadMessage) => void;
+  onOpenComputer: (botId?: string) => void;
 }) {
   const { t } = useLingui();
   const [atEnd, setAtEnd] = useState(true);
@@ -4217,6 +4416,65 @@ const Transcript = memo(function Transcript({
     workingBotName != null && workingBotName !== ""
       ? t`${workingBotName} is working`
       : t`Bots are working`;
+  const [quoteDraft, setQuoteDraft] = useState<{
+    message: ThreadMessage;
+    text: string;
+    range: Range;
+  } | null>(null);
+  const selectingWithMouse = useRef(false);
+
+  const evaluateSelection = useCallback(() => {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+      setQuoteDraft(null);
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    const rowOf = (node: Node) =>
+      (node instanceof Element ? node : node.parentElement)?.closest<HTMLElement>(
+        "[data-message-id]",
+      ) ?? null;
+    const draft = quoteDraftForSelection(
+      {
+        startRow: rowOf(range.startContainer),
+        endRow: rowOf(range.endContainer),
+        text: selection.toString(),
+      },
+      messageById,
+    );
+    setQuoteDraft(draft ? { ...draft, range } : null);
+  }, [messageById]);
+
+  // Keyboard and assistive-tech selections never reach a mouseup, so the pill
+  // lifecycle listens on selectionchange; the mouse flag keeps it hidden while
+  // a drag is still in flight.
+  useEffect(() => {
+    const onMouseDown = (event: MouseEvent) => {
+      selectingWithMouse.current = true;
+      if ((event.target as Element | null)?.closest?.("[data-quote-selection]")) return;
+      setQuoteDraft(null);
+    };
+    const onMouseUp = () => {
+      selectingWithMouse.current = false;
+      evaluateSelection();
+    };
+    const onSelectionChange = () => {
+      if (!selectingWithMouse.current) evaluateSelection();
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setQuoteDraft(null);
+    };
+    document.addEventListener("mousedown", onMouseDown, true);
+    document.addEventListener("mouseup", onMouseUp, true);
+    document.addEventListener("selectionchange", onSelectionChange);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onMouseDown, true);
+      document.removeEventListener("mouseup", onMouseUp, true);
+      document.removeEventListener("selectionchange", onSelectionChange);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [evaluateSelection]);
   const snapToEnd = useCallback(() => {
     const element = scrollRef.current;
     if (!element) return;
@@ -4342,6 +4600,9 @@ const Transcript = memo(function Transcript({
             <div
               key={message.id}
               data-message-id={message.id}
+              // Only persisted messages can be reply targets; synthetic rows
+              // (progress:, subagent:) carry a `prefix:` id.
+              data-quotable={message.id.includes(":") ? undefined : ""}
               className={peerReceipt ? "relative py-0.5" : "group/message relative hover:z-20"}
             >
               {!peerReceipt && !message.id.startsWith("progress:") ? (
@@ -4415,6 +4676,7 @@ const Transcript = memo(function Transcript({
                     voiceReady={voiceReady}
                     speaking={speakingMessageId === message.id}
                     onSpeak={() => onSpeak(message)}
+                    onOpenComputer={onOpenComputer}
                   />
                 </div>
               </div>
@@ -4452,6 +4714,16 @@ const Transcript = memo(function Transcript({
           <ActiveBotGlyph bots={workingBots} label={workingLabel} />
         ) : null}
       </div>
+      {quoteDraft ? (
+        <QuoteSelectionButton
+          range={quoteDraft.range}
+          onQuote={() => {
+            onQuote(quoteDraft.message, quoteDraft.text);
+            window.getSelection()?.removeAllRanges();
+            setQuoteDraft(null);
+          }}
+        />
+      ) : null}
       <button
         ref={jumpButtonRef}
         type="button"
@@ -4466,6 +4738,80 @@ const Transcript = memo(function Transcript({
         <ArrowDown size={17} strokeWidth={1.8} />
       </button>
     </div>
+  );
+});
+
+/**
+ * Floating Quote action anchored to the selection's bounding rect. Measures
+ * itself after mount so it can flip below the selection when there is no room
+ * above and stay clamped inside the viewport; re-anchors on scroll/resize.
+ */
+const QuoteSelectionButton = memo(function QuoteSelectionButton({
+  range,
+  onQuote,
+}: {
+  range: Range;
+  onQuote: () => void;
+}) {
+  const { t } = useLingui();
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const [placement, setPlacement] = useState<{
+    top: number;
+    left: number;
+    above: boolean;
+  } | null>(null);
+
+  useLayoutEffect(() => {
+    const update = () => {
+      if (range.collapsed || !document.contains(range.commonAncestorContainer)) {
+        setPlacement(null);
+        return;
+      }
+      const rect = range.getBoundingClientRect();
+      const width = buttonRef.current?.offsetWidth ?? 0;
+      const height = buttonRef.current?.offsetHeight ?? 0;
+      const above = rect.top >= height + 8;
+      setPlacement({
+        top: above ? rect.top - 8 : rect.bottom + 8,
+        left: Math.min(
+          Math.max(rect.left + rect.width / 2, width / 2 + 8),
+          window.innerWidth - width / 2 - 8,
+        ),
+        above,
+      });
+    };
+    update();
+    window.addEventListener("resize", update);
+    // Scroll doesn't bubble — listen on the capture phase to catch any scroller.
+    window.addEventListener("scroll", update, { capture: true, passive: true });
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [range]);
+
+  return createPortal(
+    <button
+      ref={buttonRef}
+      type="button"
+      data-quote-selection
+      data-testid="quote-selection"
+      onMouseDown={(event) => {
+        // Keep the highlight alive until the click commits the quote.
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+      onClick={onQuote}
+      style={placement ? { top: placement.top, left: placement.left } : { visibility: "hidden" }}
+      className={cn(
+        "fixed z-50 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-border bg-background px-3 py-1.5 text-[13px] font-medium text-foreground shadow-md hover:bg-muted",
+        placement?.above === false ? "translate-y-0" : "-translate-y-full",
+      )}
+    >
+      <TextQuote size={13} strokeWidth={2} />
+      {t`Quote`}
+    </button>,
+    document.body,
   );
 });
 
@@ -4488,6 +4834,7 @@ const Composer = memo(function Composer({
   onStop,
   onVoice,
   replyTarget,
+  replyQuote,
   replyTargetName,
   onClearReply,
   mentionTargets,
@@ -4513,6 +4860,7 @@ const Composer = memo(function Composer({
   onStop: () => Promise<void>;
   onVoice?: () => void;
   replyTarget?: ThreadMessage | null;
+  replyQuote?: string | null;
   replyTargetName?: string;
   onClearReply?: () => void;
   mentionTargets?: ComposerMention[];
@@ -4812,7 +5160,11 @@ const Composer = memo(function Composer({
           data-testid="reply-chip"
           className="mb-2 flex items-center gap-2 rounded-full border border-border bg-muted px-3 py-1.5 text-[13px] text-foreground/75"
         >
-          <span className="min-w-0 flex-1 truncate text-muted-foreground">{t`Replying to ${replyName}`}</span>
+          <span className="min-w-0 flex-1 truncate text-muted-foreground">
+            {replyQuote
+              ? t`Replying to ${replyName}: “${replyQuote}”`
+              : t`Replying to ${replyName}`}
+          </span>
           <button
             type="button"
             aria-label={t`Cancel reply`}
@@ -4944,7 +5296,7 @@ const Composer = memo(function Composer({
       ) : null}
       <div
         data-testid="composer-bar"
-        className="flex items-center gap-3.5 rounded-full border border-border bg-background py-[9px] pe-2.5 ps-3"
+        className="flex items-center gap-3.5 rounded-full border border-border bg-background py-[9px] pe-2.5 ps-3 transition-colors focus-within:border-ring"
       >
         <input
           ref={fileInputRef}
@@ -4955,14 +5307,14 @@ const Composer = memo(function Composer({
           onChange={(event) => void onAttachmentPick(event.target.files)}
         />
         <Button
-          variant="outline"
+          variant="ghost"
           size="icon"
           aria-label={t`Attach file`}
           disabled={disabled}
           onClick={() => fileInputRef.current?.click()}
-          className="rounded-full text-foreground/75"
+          className="size-8 shrink-0 rounded-full border border-border bg-muted text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
         >
-          <Plus size={17} strokeWidth={1.8} />
+          <Plus size={16} strokeWidth={2} />
         </Button>
         <div className="flex min-w-0 flex-1 flex-wrap items-end gap-1.5">
           {selectedSkill ? (
@@ -5086,21 +5438,21 @@ const Composer = memo(function Composer({
             title={t`Voice`}
             disabled={disabled}
             onClick={onVoice}
-            className="rounded-full text-foreground/75"
+            className="size-8 shrink-0 rounded-full text-foreground/75"
           >
             <Mic size={16} strokeWidth={1.8} />
           </Button>
         ) : null}
         {running ? (
-          <>
+          <div className="flex items-center gap-1.5 shrink-0">
             <Button
               size="icon"
               aria-label={t`Send`}
               disabled={sending || !canSend || disabled}
               onClick={send}
-              className="size-10 rounded-full"
+              className="size-8 rounded-full bg-white text-black hover:bg-white/90 shadow-sm transition-transform active:scale-95"
             >
-              <ArrowUp size={18} strokeWidth={2} />
+              <ArrowUp size={16} strokeWidth={2.2} />
             </Button>
             <Button
               variant="outline"
@@ -5108,20 +5460,20 @@ const Composer = memo(function Composer({
               aria-label={t`Stop`}
               disabled={sending}
               onClick={() => void onStop()}
-              className="size-10 rounded-full text-foreground/75"
+              className="size-8 rounded-full border border-border bg-muted text-foreground/80 shadow-sm transition-colors hover:bg-accent hover:text-foreground"
             >
-              <Square size={12} strokeWidth={0} fill="currentColor" />
+              <Square size={11} strokeWidth={0} fill="currentColor" />
             </Button>
-          </>
+          </div>
         ) : (
           <Button
             size="icon"
             aria-label={t`Send`}
             disabled={sending || !canSend || disabled}
             onClick={send}
-            className="size-9 rounded-full"
+            className="size-8 shrink-0 rounded-full bg-white text-black hover:bg-white/90 shadow-sm transition-transform active:scale-95 disabled:bg-white/10 disabled:text-muted-foreground/30 disabled:shadow-none"
           >
-            <ArrowUp size={18} strokeWidth={2} />
+            <ArrowUp size={16} strokeWidth={2.2} />
           </Button>
         )}
       </div>
@@ -5192,6 +5544,37 @@ function previewMessageText(message: ThreadMessage): string {
     return t`Attachment`;
   }
   return t`Message`;
+}
+
+function formatRosterTime(isoDate?: string | null): string {
+  if (!isoDate) return "";
+  try {
+    const d = new Date(isoDate);
+    if (Number.isNaN(d.getTime())) return "";
+    const locale = i18n.locale || "en";
+    const now = new Date();
+    const isToday =
+      d.getDate() === now.getDate() &&
+      d.getMonth() === now.getMonth() &&
+      d.getFullYear() === now.getFullYear();
+    if (isToday) {
+      return d.toLocaleTimeString(locale, { hour: "numeric", minute: "2-digit" });
+    }
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    const isYesterday =
+      d.getDate() === yesterday.getDate() &&
+      d.getMonth() === yesterday.getMonth() &&
+      d.getFullYear() === yesterday.getFullYear();
+    if (isYesterday) return t`Yesterday`;
+    const diffDays = Math.floor((now.getTime() - d.getTime()) / (1000 * 60 * 60 * 24));
+    if (diffDays < 7) {
+      return d.toLocaleDateString(locale, { weekday: "short" });
+    }
+    return d.toLocaleDateString(locale, { month: "short", day: "numeric" });
+  } catch {
+    return "";
+  }
 }
 
 function MessageHoverActions({
@@ -5365,6 +5748,7 @@ const MessageView = memo(function MessageView({
   voiceReady,
   speaking,
   onSpeak,
+  onOpenComputer,
 }: {
   artifactTarget: ArtifactTarget;
   canAnswer: boolean;
@@ -5384,6 +5768,7 @@ const MessageView = memo(function MessageView({
   voiceReady: boolean;
   speaking: boolean;
   onSpeak: () => void;
+  onOpenComputer: (botId?: string) => void;
 }) {
   const { t } = useLingui();
   const isNarration =
@@ -5395,10 +5780,24 @@ const MessageView = memo(function MessageView({
   const isLive = message.id.startsWith("progress:");
   const visibleNarrationBlocks = message.blocks.filter((block) => !isToolActivityBlock(block));
   const parentJumpId = replyPreview?.id ?? replyToMessageId;
+  const speakerBot = message.botId ? peerBot?.(message.botId) : undefined;
+  const speakerColorDef = useMemo(
+    () => resolvePersonaColorDef(message.botId ?? "bot", speakerBot?.color),
+    [message.botId, speakerBot?.color],
+  );
   const messageContext = (
     <>
       {speakerName ? (
-        <div className="mb-1 text-[12.5px] font-medium text-muted-foreground" dir="auto">
+        <div
+          className="mb-1.5 flex items-center gap-2 text-[13px] font-semibold tracking-tight"
+          dir="auto"
+          style={{ color: speakerColorDef.light }}
+        >
+          <BotAvatar
+            color={speakerBot?.color ?? FALLBACK_BOT_COLOR}
+            identity={message.botId}
+            size={22}
+          />
           {speakerName}
         </div>
       ) : null}
@@ -5411,7 +5810,11 @@ const MessageView = memo(function MessageView({
           className="mb-2 block max-w-[74%] truncate rounded-[14px] border border-border bg-background px-3 py-2 text-start text-[12.5px] text-muted-foreground hover:border-border hover:text-foreground/75"
           dir="auto"
         >
-          {replyPreview ? previewMessageText(replyPreview) : t`Earlier message`}
+          {message.replyQuote
+            ? `“${message.replyQuote}”`
+            : replyPreview
+              ? previewMessageText(replyPreview)
+              : t`Earlier message`}
         </button>
       ) : null}
     </>
@@ -5740,6 +6143,7 @@ const MessageView = memo(function MessageView({
           return (
             <div
               key={i}
+              data-testid="computer-card"
               className="w-[340px] rounded-[18px] border border-border bg-muted px-[18px] py-4"
             >
               <div className="flex items-center justify-between">
@@ -5759,6 +6163,14 @@ const MessageView = memo(function MessageView({
               <div className="my-2.5 text-[14.5px] leading-[1.5] text-foreground/75">
                 <ChatMarkdown>{block.text}</ChatMarkdown>
               </div>
+              <Button
+                type="button"
+                size="sm"
+                data-testid="computer-card-open"
+                onClick={() => onOpenComputer(message.botId)}
+              >
+                <Trans>Open</Trans>
+              </Button>
             </div>
           );
         }

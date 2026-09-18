@@ -300,6 +300,31 @@ describeJourneys("required product journeys", () => {
     });
     expect(foreignSection.status).toBeGreaterThanOrEqual(400);
     expect(await rpc<unknown[]>(app, bob, "botSections/list")).toEqual([]);
+    const renamed = await rpc<{ id: string; name: string }>(app, ada, "botSections/update", {
+      sectionId: section.id,
+      name: "Delivery",
+    });
+    expect(renamed).toMatchObject({ id: section.id, name: "Delivery" });
+    expect(await rpc<Array<{ id: string; name: string }>>(app, ada, "botSections/list")).toEqual([
+      expect.objectContaining({ id: section.id, name: "Delivery" }),
+    ]);
+    await rpc<{ id: string; name: string }>(app, ada, "botSections/create", {
+      botId: coder.id,
+      name: "Archive",
+    });
+    const renameClash = await raw(app, ada, "botSections/update", {
+      sectionId: section.id,
+      name: "Archive",
+    });
+    expect(renameClash.status).toBe(409);
+    const foreignRename = await raw(app, bob, "botSections/update", {
+      sectionId: section.id,
+      name: "Stolen",
+    });
+    expect(foreignRename.status).toBeGreaterThanOrEqual(400);
+    expect(await rpc<Array<{ id: string; name: string }>>(app, ada, "botSections/list")).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: section.id, name: "Delivery" })]),
+    );
     const duplicate = await rpc<Bot>(app, ada, "bots/duplicate", { botId: chief.id });
     expect(duplicate).toMatchObject({
       name: "Chief copy",
@@ -1560,6 +1585,29 @@ describeJourneys("required product journeys", () => {
     expect((await rpc<Bot[]>(app, cookie, "bots/list")).map((bot) => bot.name)).toEqual(["Nested"]);
   });
 
+  it("12b: a bot can silence and resume its own finish notifications", async () => {
+    const cookie = await signup(app, `notify-finish-j-${stamp}@rakazo.test`, "Notify");
+    const bot = await rpc<Bot>(app, cookie, "bots/create", {
+      name: "Chief",
+      title: "",
+      description: "",
+      instructions: "",
+      notifyOnFinish: true,
+    });
+    expect(bot.notifyOnFinish).toBe(true);
+
+    await sendAndWait(app, cookie, bot.id, "silence finish notifications");
+    const silenced = (await rpc<Bot[]>(app, cookie, "bots/list")).find((row) => row.id === bot.id);
+    expect(silenced?.notifyOnFinish).toBe(false);
+    expect((await rpc<Bot>(app, cookie, "bots/get", { botId: bot.id })).notifyOnFinish).toBe(false);
+
+    await sendAndWait(app, cookie, bot.id, "resume finish notifications");
+    expect(
+      (await rpc<Bot[]>(app, cookie, "bots/list")).find((row) => row.id === bot.id)?.notifyOnFinish,
+    ).toBe(true);
+    expect((await rpc<Bot>(app, cookie, "bots/get", { botId: bot.id })).notifyOnFinish).toBe(true);
+  });
+
   it("13: a subagent shows up in the parent thread without creating a bot", async () => {
     const cookie = await signup(app, `subagent-j-${stamp}@rakazo.test`, "Subagent");
     const bot = await rpc<Bot>(app, cookie, "bots/create", {
@@ -1701,6 +1749,57 @@ describeJourneys("required product journeys", () => {
     });
     expect(file.content).toContain("nonce-ok");
     expect(file.content).not.toContain("nonce-dup");
+  });
+
+  it("15b: a free-text chat message answers a waiting ask", async () => {
+    const cookie = await signup(app, `ask-freetext-j-${stamp}@rakazo.test`, "Ask Free");
+    const bot = await rpc<Bot>(app, cookie, "bots/create", {
+      name: "Chief",
+      title: "",
+      description: "",
+      instructions: "",
+      notifyOnFinish: true,
+    });
+
+    const asked = await rpc<{ runId: string }>(app, cookie, "threads/send", {
+      botId: bot.id,
+      text: "ask me which city to use",
+    });
+    const waiting = await waitFor(
+      app,
+      cookie,
+      bot.id,
+      (snap) => snap.run?.id === asked.runId && snap.run.status === "waiting_input",
+    );
+    expect(
+      waiting.messages.some((message) =>
+        message.blocks.some((block) => block.kind === "ask" && block.status !== "answered"),
+      ),
+    ).toBe(true);
+
+    await rpc(app, cookie, "threads/send", {
+      botId: bot.id,
+      text: "Paris",
+      clientNonce: `ask-freetext-${stamp}`,
+    });
+    const answered = await waitFor(app, cookie, bot.id, (snap) =>
+      snap.messages.some((message) =>
+        message.blocks.some(
+          (block) =>
+            block.kind === "ask" && block.status === "answered" && block.answer === "Paris",
+        ),
+      ),
+    );
+    expect(
+      answered.messages.flatMap((message) => message.blocks).find((block) => block.kind === "ask"),
+    ).toMatchObject({ status: "answered", answer: "Paris" });
+    await waitForDatabase(async () => {
+      const run = await prisma.run.findUnique({ where: { id: asked.runId } });
+      return run?.status === "completed";
+    });
+    expect((await prisma.run.findUniqueOrThrow({ where: { id: asked.runId } })).status).toBe(
+      "completed",
+    );
   });
 
   it("16: routine test-run and plugin connect/revoke", async () => {
@@ -2659,7 +2758,7 @@ type Snap = {
     id: string;
     seq: number;
     runId?: string | null;
-    blocks: Array<{ kind?: string; status?: string; actions?: unknown[] }>;
+    blocks: Array<{ kind?: string; status?: string; answer?: string; actions?: unknown[] }>;
   }>;
   run: { id: string; status: string } | null;
   activeRuns?: Array<{ id: string; status: string }>;

@@ -85,6 +85,31 @@ describe("thread event reduction", () => {
     expect(next?.cursor).toBe(4);
   });
 
+  it("appends a quoted reply carrying its excerpt", () => {
+    const initial = snapshot([message("message-1", [{ kind: "text", text: "Done" }], 1)]);
+
+    const next = reduceThreadSnapshot(
+      initial,
+      event({
+        type: "thread.message.created",
+        seq: 4,
+        payload: {
+          messageId: "reply-1",
+          role: "user",
+          blocks: [{ kind: "text", text: "why this?" }],
+          replyToMessageId: "message-1",
+          replyQuote: "Done",
+        },
+      }),
+    );
+
+    expect(next?.messages.find((message) => message.id === "reply-1")).toMatchObject({
+      role: "user",
+      replyToMessageId: "message-1",
+      replyQuote: "Done",
+    });
+  });
+
   it("prepends older pages in order, removes overlaps, and advances the history cursor", () => {
     const initial = snapshot([message("m-2", [], 2), message("m-3", [], 3)], 2);
 
@@ -1387,6 +1412,30 @@ describe("computer event reduction", () => {
       false,
     );
     expect(computerTakeoverBlocked(computer({ busyBotName: "Writer" }), "completed")).toBe(false);
+  });
+
+  it("ignores computer events that belong to a different bot", () => {
+    const prev = computer({ takeoverRequested: false, controlHolder: "bot" });
+    expect(
+      reduceComputerStatus(
+        prev,
+        event({
+          type: "computer.takeover.requested",
+          botId: "bot-peer",
+          payload: {},
+        }),
+      ),
+    ).toBe(prev);
+    expect(
+      reduceComputerStatus(
+        prev,
+        event({
+          type: "computer.status",
+          botId: "bot-peer",
+          payload: { status: "suspended" },
+        }),
+      ),
+    ).toBe(prev);
   });
 
   it("marks takeover requested and clears control unless the lease was retained", () => {

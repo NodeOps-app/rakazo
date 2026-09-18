@@ -6,6 +6,7 @@ export function resolveSandboxProvider(source: NodeJS.ProcessEnv = process.env):
   if (requested === "none") return "none";
   if (requested === "e2b" && !optional(source.E2B_API_KEY)) return "none";
   if (requested === "daytona" && !optional(source.DAYTONA_API_KEY)) return "none";
+  if (requested === "createos" && !optional(source.CREATEOS_SANDBOX_API_KEY)) return "none";
   if (requested === "box" && !optional(source.BOX_API_KEY)) return "none";
   // Production without a supervisor token cannot run Docker computers; boot as none instead of exiting.
   if (

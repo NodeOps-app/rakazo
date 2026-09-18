@@ -18,25 +18,26 @@ const scope = {
 };
 const secret = "fake-screen-proxy-browser-test-secret";
 const screenHtml = `<!doctype html><title>Fake screen</title>
-<script type="module">
-  import { loaded } from './core/rfb.js';
-  const attempt = (read) => { try { return read(); } catch { return 'blocked'; } };
-  const result = {
-    asset: loaded,
-    cookie: attempt(() => document.cookie),
-    storage: attempt(() => localStorage.getItem('app-data')),
-    parent: attempt(() => parent.document.title),
-    api: await fetch('/session', { credentials: 'include' }).then(r => r.text()).catch(() => 'blocked'),
-  };
-  const socketUrl = new URL('./websockify', location.href);
-  socketUrl.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const socket = new WebSocket(socketUrl);
-  socket.onmessage = (event) => {
-    result.socket = event.data;
-    socket.close();
-    document.body.textContent = JSON.stringify(result);
-  };
-</script><body></body>`;
+<script type="module" src="./entry.js"></script><body></body>`;
+const screenEntryJs = `
+import { loaded } from './core/rfb.js';
+const attempt = (read) => { try { return read(); } catch { return 'blocked'; } };
+const result = {
+  asset: loaded,
+  cookie: attempt(() => document.cookie),
+  storage: attempt(() => localStorage.getItem('app-data')),
+  parent: attempt(() => parent.document.title),
+  api: await fetch('/session', { credentials: 'include' }).then(r => r.text()).catch(() => 'blocked'),
+};
+const socketUrl = new URL('./websockify', location.href);
+socketUrl.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+const socket = new WebSocket(socketUrl);
+socket.onmessage = (event) => {
+  result.socket = event.data;
+  socket.close();
+  document.body.textContent = JSON.stringify(result);
+};
+`;
 
 async function listen(server: NetServer) {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -57,6 +58,7 @@ for (const mode of ["development", "preview"] as const) {
     let stop: () => Promise<void>;
 
     let authorized = true;
+    let assetAttempts = 0;
     test.beforeAll(async () => {
       const root = await mkdtemp(path.join(tmpdir(), "rakazo-screen-test-"));
       await mkdir(path.join(root, "dist"));
@@ -64,12 +66,19 @@ for (const mode of ["development", "preview"] as const) {
         // Even a listener explicitly requesting same-origin access cannot loosen the proxy policy.
         res.setHeader(
           "Content-Security-Policy",
-          `sandbox allow-scripts allow-same-origin allow-pointer-lock; frame-ancestors ${origin}`,
+          `sandbox allow-scripts allow-same-origin allow-pointer-lock; script-src 'self'; frame-ancestors ${origin}`,
         );
         res.setHeader("Set-Cookie", "app-session=attacker; Path=/");
         if (req.url === "/core/rfb.js") {
+          if (assetAttempts++ === 0) {
+            res.destroy();
+            return;
+          }
           res.setHeader("Content-Type", "text/javascript");
           res.end('export const loaded = "module loaded";');
+        } else if (req.url === "/entry.js") {
+          res.setHeader("Content-Type", "text/javascript");
+          res.end(screenEntryJs);
         } else {
           res.setHeader("Content-Type", "text/html");
           res.end(screenHtml);
@@ -164,14 +173,16 @@ for (const mode of ["development", "preview"] as const) {
       await page.goto(`${origin}/app`);
       const response = await page.goto(screenUrl);
       await expect(page.locator("body")).toContainText('"socket":"ok"');
+      expect(assetAttempts).toBeGreaterThanOrEqual(2);
       const result = JSON.parse(await page.locator("body").innerText());
       expect(result).toMatchObject({
         asset: "module loaded",
         socket: "ok",
         cookie: "blocked",
-        storage: "blocked",
+        storage: null,
         api: "blocked",
       });
+      expect(result.storage).not.toBe("private-app-data");
       expect(response?.headers()["content-security-policy"]).toContain(
         "sandbox allow-scripts allow-pointer-lock",
       );
@@ -233,7 +244,7 @@ for (const mode of ["development", "preview"] as const) {
           asset: "module loaded",
           socket: "ok",
           cookie: "blocked",
-          storage: "blocked",
+          storage: null,
           parent: "blocked",
           api: "blocked",
         });
