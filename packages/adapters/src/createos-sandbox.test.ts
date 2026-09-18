@@ -246,6 +246,8 @@ describe("CreateOSSandboxProvider", () => {
     }
 
     expect(files.map((file) => file.path)).toEqual(["notes.txt"]);
+    expect(fixture.execs.some((exec) => exec.command.includes("os.lstat(path)"))).toBe(true);
+    expect(fixture.execs.some((exec) => exec.command.includes("stat.S_ISLNK"))).toBe(true);
   });
 
   it("keeps existing workspace files discoverable after stop clears provider state", async () => {

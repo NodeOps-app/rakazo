@@ -301,13 +301,22 @@ function cspWithStorageShimHash(header: string | string[] | undefined) {
     .split(";")
     .map((directive) => directive.trim())
     .filter(Boolean);
-  const scriptIndex = directives.findIndex((directive) => directive.startsWith("script-src"));
+  const scriptIndex =
+    findCspDirective(directives, "script-src-elem") ??
+    findCspDirective(directives, "script-src") ??
+    findCspDirective(directives, "default-src");
   if (scriptIndex >= 0) {
     directives[scriptIndex] = `${directives[scriptIndex]} ${NOVNC_STORAGE_SHIM_HASH}`;
-  } else {
-    directives.push(`script-src 'self' ${NOVNC_STORAGE_SHIM_HASH}`);
   }
   return directives.join("; ");
+}
+
+function findCspDirective(directives: string[], name: string) {
+  const prefix = `${name} `;
+  const index = directives.findIndex(
+    (directive) => directive === name || directive.startsWith(prefix),
+  );
+  return index >= 0 ? index : undefined;
 }
 
 export default defineConfig(({ mode }) => {

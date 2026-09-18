@@ -314,15 +314,17 @@ out = []
 if not os.path.isdir(root):
     print(json.dumps(out))
     raise SystemExit(0)
-for name in os.listdir(root):
-    path = os.path.join(root, name)
-    try:
-        st = os.stat(path)
-    except FileNotFoundError:
-        continue
-    out.append({"name": name, "kind": "dir" if stat.S_ISDIR(st.st_mode) else "file", "size": st.st_size, "executable": bool(st.st_mode & stat.S_IXUSR)})
-print(json.dumps(out))
-`;
+	for name in os.listdir(root):
+	    path = os.path.join(root, name)
+	    try:
+	        st = os.lstat(path)
+	    except FileNotFoundError:
+	        continue
+	    if stat.S_ISLNK(st.st_mode):
+	        continue
+	    out.append({"name": name, "kind": "dir" if stat.S_ISDIR(st.st_mode) else "file", "size": st.st_size, "executable": bool(st.st_mode & stat.S_IXUSR)})
+	print(json.dumps(out))
+	`;
     const result = await this.runCommand(
       computer,
       { argv: ["python3", "-c", script, target] },
@@ -926,7 +928,13 @@ for tab in tabs:
     });
     const timeout = AbortSignal.timeout(timeoutMs);
     const signal = AbortSignal.any([context.signal, timeout]);
-    const response = await this.fetchImpl(url, { method, headers, body, signal });
+    const response = await this.fetchImpl(url, {
+      method,
+      headers,
+      body,
+      signal,
+      redirect: "error",
+    });
     if (!response.ok) {
       const message = await response.text().catch(() => "");
       throw new CreateOSHttpError(response.status, message || response.statusText);
