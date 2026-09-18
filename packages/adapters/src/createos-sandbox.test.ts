@@ -141,6 +141,73 @@ describe("CreateOSSandboxProvider", () => {
     expect(command).toContain("TEST_VALUE='works'");
   });
 
+  it("rejects non-HTTPS endpoints unless loopback development mode is explicit", () => {
+    expect(
+      () => new CreateOSSandboxProvider({ apiKey: "test-key", baseUrl: "http://api.test" }),
+    ).toThrow(/HTTPS/);
+    expect(
+      () =>
+        new CreateOSSandboxProvider({
+          apiKey: "test-key",
+          baseUrl: " http://127.0.0.1:8080/ ",
+          allowInsecureLoopbackBaseUrl: true,
+        }),
+    ).not.toThrow();
+  });
+
+  it("uses defaults when optional endpoint values are blank", async () => {
+    const fixture = createosFixture();
+    await new CreateOSSandboxProvider({
+      apiKey: "test-key",
+      baseUrl: " ",
+      shape: " ",
+      rootfs: " ",
+      fetch: fixture.fetchImpl,
+    }).provision({ botId: "bot-a", homePath: "/unused" }, context);
+
+    expect(fixture.calls).toContain("POST /v1/sandboxes");
+  });
+
+  it("maps a CreateOS command error without an exit code to failure", async () => {
+    const fetchImpl = (async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/exec")) {
+        return jsonResponse({ result: { error: "boom" } });
+      }
+      return jsonResponse({});
+    }) as typeof fetch;
+    const events = [];
+    for await (const event of new CreateOSSandboxProvider({
+      apiKey: "test-key",
+      fetch: fetchImpl,
+    }).execute(computer, { argv: ["false"] }, context)) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([
+      { type: "stderr", data: "boom\n" },
+      { type: "exit", code: 1 },
+    ]);
+  });
+
+  it("reports a canceled command as exit code 130", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fetchImpl = (async () => {
+      throw new DOMException("aborted", "AbortError");
+    }) as unknown as typeof fetch;
+    const events = [];
+    for await (const event of new CreateOSSandboxProvider({
+      apiKey: "test-key",
+      fetch: fetchImpl,
+    }).execute(computer, { argv: ["sleep", "600"] }, { ...context, signal: controller.signal })) {
+      events.push(event);
+    }
+
+    expect(events.at(-1)).toEqual({ type: "exit", code: 130 });
+    expect(events[0]).toMatchObject({ type: "stderr" });
+  });
+
   it("reports a timed-out command as exit code 124", async () => {
     const fetchImpl = (async () => {
       throw new DOMException("timed out", "TimeoutError");
@@ -168,7 +235,20 @@ describe("CreateOSSandboxProvider", () => {
     expect(files.map((file) => file.path)).toEqual(["notes.txt"]);
   });
 
-  it("forgets per-sandbox state on stop and destroy", async () => {
+  it("exports existing workspace files even after provider state is reconstructed", async () => {
+    const fixture = createosFixture();
+    const files: PortableFile[] = [];
+    for await (const file of provider(fixture).exportWorkspace(
+      { ...computer, fresh: false },
+      context,
+    )) {
+      files.push(file);
+    }
+
+    expect(files.map((file) => file.path)).toEqual(["notes.txt"]);
+  });
+
+  it("keeps existing workspace files discoverable after stop clears provider state", async () => {
     const fixture = createosFixture();
     const target = provider(fixture);
     await target.act(computer, { actions: [{ kind: "wait", ms: 0 }], observe: false }, context);
@@ -176,7 +256,7 @@ describe("CreateOSSandboxProvider", () => {
 
     const afterStop: PortableFile[] = [];
     for await (const file of target.exportWorkspace(computer, context)) afterStop.push(file);
-    expect(afterStop).toEqual([]);
+    expect(afterStop.map((file) => file.path)).toEqual(["notes.txt"]);
 
     await target.destroy(computer, context);
     expect(fixture.calls).toContain("DELETE /v1/sandboxes/sbx-1");

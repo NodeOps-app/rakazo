@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { ClientRequest, IncomingMessage } from "node:http";
 import http from "node:http";
 import https from "node:https";
@@ -26,6 +26,20 @@ import {
 const webPort = Number(process.env.WEB_PORT ?? 5173);
 const DESKTOP_STACK_PROBE_PATH = "/.well-known/rakazo-desktop-stack";
 const DESKTOP_STACK_TOKEN_HEADER = "x-rakazo-desktop-stack-token";
+const NOVNC_HTML_LIMIT_BYTES = 2 * 1024 * 1024;
+const NOVNC_STORAGE_SHIM = `
+Object.defineProperty(window, "localStorage", {
+  configurable: true,
+  value: {
+    getItem() { return null; },
+    setItem() {},
+    removeItem() {},
+    clear() {},
+  },
+});`;
+const NOVNC_STORAGE_SHIM_HASH = `'sha256-${createHash("sha256")
+  .update(NOVNC_STORAGE_SHIM)
+  .digest("base64")}'`;
 
 function equalStackToken(expected: string, supplied: string | string[] | undefined) {
   if (expected === "" || typeof supplied !== "string") return false;
@@ -120,13 +134,39 @@ function attachNovncProxy(server: ViteDevServer | PreviewServer, secret: string,
           }
           const responseHeaders = safeScreenProxyResponseHeaders(incoming.headers);
           if (shouldInjectNovncStorageShim(responseHeaders)) {
+            if (declaredHtmlLengthExceedsLimit(responseHeaders)) {
+              incoming.destroy();
+              res.writeHead(502);
+              res.end("Screen response too large");
+              return;
+            }
             const chunks: Buffer[] = [];
-            incoming.on("data", (chunk: Buffer) => chunks.push(chunk));
+            let bytes = 0;
+            let exceeded = false;
+            incoming.on("data", (chunk: Buffer) => {
+              bytes += chunk.byteLength;
+              if (bytes > NOVNC_HTML_LIMIT_BYTES) {
+                exceeded = true;
+                incoming.destroy();
+                if (!res.headersSent) res.writeHead(502);
+                res.end("Screen response too large");
+                return;
+              }
+              chunks.push(chunk);
+            });
             incoming.on("end", () => {
+              if (exceeded || res.destroyed) return;
               const body = injectNovncStorageShim(Buffer.concat(chunks).toString("utf8"));
               delete responseHeaders["content-length"];
+              responseHeaders["content-security-policy"] = cspWithStorageShimHash(
+                responseHeaders["content-security-policy"],
+              );
               res.writeHead(incoming.statusCode ?? 502, responseHeaders);
               res.end(body);
+            });
+            incoming.on("error", () => {
+              if (!res.headersSent && !res.destroyed) res.writeHead(502);
+              if (!res.destroyed) res.end("Screen unavailable");
             });
             return;
           }
@@ -241,21 +281,33 @@ function shouldInjectNovncStorageShim(headers: http.IncomingHttpHeaders) {
   return contentType.includes("text/html") || contentType.includes("application/xhtml+xml");
 }
 
+function declaredHtmlLengthExceedsLimit(headers: http.IncomingHttpHeaders) {
+  const length = Number(headers["content-length"]);
+  return Number.isFinite(length) && length > NOVNC_HTML_LIMIT_BYTES;
+}
+
 function injectNovncStorageShim(html: string) {
-  const shim = `<script>
-Object.defineProperty(window, "localStorage", {
-  configurable: true,
-  value: {
-    getItem() { return null; },
-    setItem() {},
-    removeItem() {},
-    clear() {},
-  },
-});
-</script>`;
+  const shim = `<script>${NOVNC_STORAGE_SHIM}</script>`;
   return html.includes("<head>")
     ? html.replace("<head>", `<head>${shim}`)
     : html.replace(/<script\b/i, `${shim}<script`);
+}
+
+function cspWithStorageShimHash(header: string | string[] | undefined) {
+  if (!header) return header;
+  if (Array.isArray(header)) return header.map((value) => cspWithStorageShimHash(value) ?? value);
+  if (header.includes(NOVNC_STORAGE_SHIM_HASH)) return header;
+  const directives = header
+    .split(";")
+    .map((directive) => directive.trim())
+    .filter(Boolean);
+  const scriptIndex = directives.findIndex((directive) => directive.startsWith("script-src"));
+  if (scriptIndex >= 0) {
+    directives[scriptIndex] = `${directives[scriptIndex]} ${NOVNC_STORAGE_SHIM_HASH}`;
+  } else {
+    directives.push(`script-src 'self' ${NOVNC_STORAGE_SHIM_HASH}`);
+  }
+  return directives.join("; ");
 }
 
 export default defineConfig(({ mode }) => {

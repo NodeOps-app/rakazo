@@ -134,11 +134,13 @@ describeCreateos("live CreateOS canary", () => {
       expect((await sandbox.observe(computer, ctx)).image.byteLength).toBeGreaterThan(0);
       expect((await sandbox.connectScreen(computer, { interactive: true }, ctx)).url).toBeTruthy();
 
-      await sandbox.writeFile(
+      for await (const event of sandbox.execute(
         computer,
-        { path: "canary.txt", content: new TextEncoder().encode("preserved") },
+        { argv: ["bash", "-lc", "printf preserved > canary.txt"] },
         ctx,
-      );
+      )) {
+        if (event.type === "exit") expect(event.code).toBe(0);
+      }
 
       // A GUI-only action must still mark the workspace exportable.
       await sandbox.act(computer, { actions: [{ kind: "wait", ms: 0 }], observe: false }, ctx);

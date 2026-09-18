@@ -60,6 +60,7 @@ export interface CreateOSSandboxProviderOptions {
   shape?: string;
   rootfs?: string;
   fetch?: typeof fetch;
+  allowInsecureLoopbackBaseUrl?: boolean;
 }
 
 interface CreateOSView {
@@ -93,9 +94,12 @@ export class CreateOSSandboxProvider implements SandboxProvider {
   private readonly dirtyWorkspaces = new Set<string>();
 
   constructor(private readonly options: CreateOSSandboxProviderOptions) {
-    this.baseUrl = (options.baseUrl ?? DEFAULT_CREATEOS_BASE_URL).replace(/\/+$/, "");
-    this.shape = options.shape ?? DEFAULT_CREATEOS_SHAPE;
-    this.rootfs = options.rootfs ?? DEFAULT_CREATEOS_ROOTFS;
+    this.baseUrl = normalizeCreateOSBaseUrl(
+      options.baseUrl,
+      Boolean(options.allowInsecureLoopbackBaseUrl),
+    );
+    this.shape = nonBlank(options.shape, DEFAULT_CREATEOS_SHAPE);
+    this.rootfs = nonBlank(options.rootfs, DEFAULT_CREATEOS_ROOTFS);
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
   }
 
@@ -190,7 +194,12 @@ export class CreateOSSandboxProvider implements SandboxProvider {
     try {
       result = await this.runCommand(computer, request, context, timeoutMs);
     } catch (error) {
-      if (context.signal.aborted || !isTimeoutAbort(error)) throw error;
+      if (context.signal.aborted) {
+        yield { type: "stderr", data: "command canceled\n" };
+        yield { type: "exit", code: 130 };
+        return;
+      }
+      if (!isTimeoutAbort(error)) throw error;
       yield { type: "stderr", data: `command timed out after ${timeoutMs} ms\n` };
       yield { type: "exit", code: 124 };
       return;
@@ -198,7 +207,7 @@ export class CreateOSSandboxProvider implements SandboxProvider {
     if (result.result?.stdout) yield { type: "stdout", data: result.result.stdout };
     if (result.result?.stderr) yield { type: "stderr", data: result.result.stderr };
     if (result.result?.error) yield { type: "stderr", data: `${result.result.error}\n` };
-    yield { type: "exit", code: result.result?.exit_code ?? 0 };
+    yield { type: "exit", code: result.result?.exit_code ?? (result.result?.error ? 1 : 0) };
   }
 
   async connectScreen(
@@ -371,7 +380,6 @@ print(json.dumps(out))
     computer: ComputerRef,
     context: AdapterContext,
   ): AsyncIterable<PortableFile> {
-    if (!this.dirtyWorkspaces.has(computer.providerRef)) return;
     if (!(await this.hasExportableWorkspaceFiles(computer, "", context))) {
       this.dirtyWorkspaces.delete(computer.providerRef);
       return;
@@ -381,10 +389,14 @@ print(json.dumps(out))
       this.lastBrowserUris.get(computer.providerRef) ??
       "about:blank";
     await this.executeChecked(computer, ["bash", "-lc", PORTABLE_BROWSER_STOP_COMMAND], context);
+    let completed = false;
     try {
-      yield* this.walkWorkspace(computer, "", context);
+      for await (const file of this.walkWorkspace(computer, "", context)) {
+        yield file;
+      }
+      completed = true;
     } finally {
-      this.dirtyWorkspaces.delete(computer.providerRef);
+      if (completed) this.dirtyWorkspaces.delete(computer.providerRef);
       if (context.operationId !== "stop" && context.operationId !== "computer.sleep") {
         await this.launchBrowser(computer, reopenUri, context, { settleMs: 0 }).catch(
           () => undefined,
@@ -951,11 +963,7 @@ function isTransientCreateOSHttpStatus(status: number): boolean {
 }
 
 function shouldSkipCreateOSWorkspaceFile(relative: string): boolean {
-  return (
-    relative === ".browser-profiles" ||
-    relative.startsWith(".browser-profiles/") ||
-    shouldSkipPortableWorkspaceFile(relative)
-  );
+  return shouldSkipPortableWorkspaceFile(relative);
 }
 
 function createosCwd(cwd: string | undefined): string {
@@ -970,6 +978,30 @@ function isBrowserApplication(application: string): boolean {
   return /^(browser|chrome|google-chrome|google-chrome-stable|chromium|chromium-browser)$/i.test(
     application,
   );
+}
+
+function normalizeCreateOSBaseUrl(baseUrl: string | undefined, allowInsecureLoopback: boolean) {
+  const trimmed = nonBlank(baseUrl, DEFAULT_CREATEOS_BASE_URL).replace(/\/+$/, "");
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error("CREATEOS_SANDBOX_BASE_URL must be a valid URL");
+  }
+  if (parsed.protocol === "https:") return trimmed;
+  if (allowInsecureLoopback && parsed.protocol === "http:" && isLoopbackHost(parsed.hostname)) {
+    return trimmed;
+  }
+  throw new Error("CREATEOS_SANDBOX_BASE_URL must use HTTPS");
+}
+
+function nonBlank(value: string | undefined, fallback: string) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : fallback;
+}
+
+function isLoopbackHost(hostname: string) {
+  return hostname === "localhost" || hostname === "::1" || hostname.startsWith("127.");
 }
 
 function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
