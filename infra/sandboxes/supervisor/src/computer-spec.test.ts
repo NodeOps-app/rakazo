@@ -29,6 +29,7 @@ import {
   resolveComputerControlEndpoint,
   resolveScreenNetworkMode,
   resolveScreenPublishTarget,
+  resolveSpaceComputerLimit,
   resolveTeamScreenLimit,
   screenPorts,
   screenUrlFor,
@@ -50,6 +51,18 @@ describe("graphical computer spec", () => {
     expect(resolveTeamScreenLimit("4")).toBe(4);
     for (const value of ["-1", "1.5", "not-a-number"])
       expect(() => resolveTeamScreenLimit(value)).toThrow(/positive integer/);
+  });
+
+  it("validates space computer limit", () => {
+    expect(resolveSpaceComputerLimit(undefined)).toBe(0);
+    expect(resolveSpaceComputerLimit("")).toBe(0);
+    expect(resolveSpaceComputerLimit("0")).toBe(0);
+    expect(resolveSpaceComputerLimit("unlimited")).toBe(0);
+    expect(resolveSpaceComputerLimit("none")).toBe(0);
+    expect(resolveSpaceComputerLimit("10")).toBe(10);
+    expect(resolveSpaceComputerLimit("1")).toBe(1);
+    for (const value of ["-1", "1.5", "not-a-number"])
+      expect(() => resolveSpaceComputerLimit(value)).toThrow(/positive integer/);
   });
 
   it("creates a VNC desktop, not an alpine sleep fallback", () => {
@@ -791,5 +804,27 @@ describe("computer home storage", () => {
       expect(() => assertVolumeSubpathSupport(version)).toThrow(/Docker Engine 26/);
     for (const version of ["1.45", "1.46", "2.0"])
       expect(() => assertVolumeSubpathSupport(version)).not.toThrow();
+  });
+
+  it("stops promptly when Docker sends SIGTERM to the start script", () => {
+    const root = path.resolve(import.meta.dirname, "../../computer");
+    const start = readFileSync(path.join(root, "start.sh"), "utf8");
+    expect(start).toMatch(/trap shutdown TERM INT/);
+    expect(start).toMatch(/kill -TERM "\$XVFB_PID"/);
+    expect(start).not.toMatch(/while kill -0 "\$XVFB_PID"/);
+    // The handler must be in place before the first child process starts, so a stop that
+    // arrives during startup is honoured instead of waiting for Docker's grace period.
+    const trapAt = start.indexOf("trap shutdown TERM INT");
+    const firstChildAt = start.search(/^[^#\n]*&\s*$/m);
+    expect(trapAt).toBeGreaterThan(-1);
+    expect(firstChildAt).toBeGreaterThan(-1);
+    expect(trapAt).toBeLessThan(firstChildAt);
+    // A stop before Xvfb exists must not try to signal or wait on an empty PID.
+    expect(start).toMatch(/^XVFB_PID=""$/m);
+    expect(start.match(/if \[\[ -n "\$XVFB_PID" \]\]; then/g)?.length ?? 0).toBeGreaterThanOrEqual(
+      2,
+    );
+    // Steady state waits on Xvfb instead of polling, so the trap runs immediately.
+    expect(start).toMatch(/^wait "\$XVFB_PID"$/m);
   });
 });

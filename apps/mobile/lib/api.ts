@@ -10,7 +10,12 @@ import type {
   Space,
   SpaceNavigation,
 } from "@rakazo/contracts";
+import type { ThreadHistory } from "@rakazo/core";
 import {
+  aiConsentTarget,
+  aiDataUsesForProcedure,
+  cancelResponseBody,
+  ensureAiDataConsent,
   isRunTerminalEvent,
   mergeThreadHistory,
   prependThreadHistoryPage,
@@ -19,13 +24,14 @@ import {
   reduceLiveMessageBlocks,
   runFailureError,
   signupRequiresEmailVerification,
-  type ThreadHistory,
   takeLiveMessage,
   updateCloudAgentMessages,
   upsertMessageById,
 } from "@rakazo/core";
 import * as SecureStore from "expo-secure-store";
-import { defaultApiBase, type EndpointResult, normalizeApiBase } from "./endpoint";
+import { promptAiConsent } from "./ai-consent";
+import type { EndpointResult } from "./endpoint";
+import { defaultApiBase, normalizeApiBase } from "./endpoint";
 import { t } from "./i18n";
 import { resumeLiveNotifications } from "./live-notifications";
 import {
@@ -556,34 +562,70 @@ export async function rpc<T>(
     skipSpaceAuthRecovery?: boolean;
   } = {},
 ): Promise<T> {
+  const requestSpaceGeneration = spaceSelectionGeneration;
+  const uses = aiDataUsesForProcedure(proc, body);
+  const consentContext =
+    options.requestContext ?? (uses.length ? await captureApiRequestContext() : undefined);
+  await ensureAiDataConsent({
+    uses,
+    status: () =>
+      rpc(
+        "aiConsent/status",
+        { uses, ...aiConsentTarget(body) },
+        { requestContext: consentContext },
+      ),
+    prompt: promptAiConsent,
+    allow: (input) => rpc("aiConsent/allow", input, { requestContext: consentContext }),
+  });
+  // Abort with an explicit reason so every consumer of the signal (the fetch, the bounded body
+  // read, and nested recovery calls that share this signal) reports the same cause.
   const controller = new AbortController();
-  const abort = () => controller.abort();
-  if (options.signal?.aborted) abort();
-  else options.signal?.addEventListener("abort", abort, { once: true });
+  const cancel = () => controller.abort(options.signal?.reason ?? new Error("Request canceled"));
+  if (options.signal?.aborted) cancel();
+  else options.signal?.addEventListener("abort", cancel, { once: true });
   const timer =
-    options.timeoutMs === null ? undefined : setTimeout(abort, options.timeoutMs ?? RPC_TIMEOUT_MS);
+    options.timeoutMs === null
+      ? undefined
+      : setTimeout(
+          () => controller.abort(new Error("Request timed out")),
+          options.timeoutMs ?? RPC_TIMEOUT_MS,
+        );
+  const abortReason = (error: unknown) =>
+    controller.signal.aborted ? (controller.signal.reason ?? error) : error;
   // Bind recovery to the Space + selection epoch this request was sent with:
   // a 401 arriving after the user switched Spaces — including A → B → A —
   // belongs to a stale request and must not touch the current selection.
-  const requestSpaceGeneration = spaceSelectionGeneration;
-  const requestHeaders = options.requestContext?.headers ?? (await authHeaders());
+  const requestHeaders = consentContext?.headers ?? (await authHeaders());
   const requestSpaceId = requestHeaders["x-rakazo-space-id"];
   try {
-    const res = await fetch(`${options.requestContext?.apiBase ?? currentApiBase()}/rpc/${proc}`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        origin: "rakazo://",
-        ...requestHeaders,
-      },
-      body: JSON.stringify({ json: body }),
-      signal: controller.signal,
-    });
+    let res: Response;
+    try {
+      res = await fetch(`${consentContext?.apiBase ?? currentApiBase()}/rpc/${proc}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "rakazo://",
+          ...requestHeaders,
+        },
+        body: JSON.stringify({ json: body }),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      // The native fetch reports an aborted request with an implementation detail
+      // ("FetchRequestCanceledException"); say what happened instead.
+      throw abortReason(error);
+    }
+    if (proc === "aiConsent/status" && res.status === 404) {
+      cancelResponseBody(res);
+      throw new Error(t("Update your server to use AI data sharing in this mobile version."));
+    }
     const parsed = await readBoundedJsonResponse<{ json?: T; error?: { message?: string } }>(
       res,
       MAX_MOBILE_RPC_RESPONSE_BYTES,
       controller.signal,
-    );
+    ).catch((error: unknown) => {
+      throw abortReason(error);
+    });
     if (!res.ok || parsed.error) {
       const message = parsed.error?.message ?? `rpc ${proc} failed`;
       const unauthorized = res.status === 401 || /unauthorized/i.test(message);
@@ -662,7 +704,7 @@ export async function rpc<T>(
     return parsed.json as T;
   } finally {
     if (timer) clearTimeout(timer);
-    options.signal?.removeEventListener("abort", abort);
+    options.signal?.removeEventListener("abort", cancel);
   }
 }
 
@@ -714,6 +756,7 @@ export type MobileMessage = {
   role: "user" | "bot" | "system";
   botId?: string;
   replyToMessageId?: string;
+  replyQuote?: string;
   createdAt?: string;
   blocks: MessageBlock[];
 };
@@ -1078,6 +1121,7 @@ export function applyMobileThreadEvent(
       replyToMessageId: event.payload?.replyToMessageId
         ? String(event.payload.replyToMessageId)
         : undefined,
+      replyQuote: event.payload?.replyQuote ? String(event.payload.replyQuote) : undefined,
     };
     return {
       ...prev,

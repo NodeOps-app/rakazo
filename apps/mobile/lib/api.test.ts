@@ -1,5 +1,9 @@
+vi.mock("./ai-consent", () => ({ promptAiConsent: vi.fn() }));
+
 import * as SecureStore from "expo-secure-store";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { promptAiConsent } from "./ai-consent";
+import type { MobileMessage, MobileSnapshot } from "./api.js";
 import {
   adoptDeletedSpaceFallback,
   applyMobileThreadEvent,
@@ -11,8 +15,6 @@ import {
   loadApiBase,
   MAX_MOBILE_AUTH_RESPONSE_BYTES,
   MAX_MOBILE_RPC_RESPONSE_BYTES,
-  type MobileMessage,
-  type MobileSnapshot,
   mergeMobileSnapshot,
   passwordResetCapabilities,
   prependMobileMessagePage,
@@ -244,6 +246,83 @@ describe("mobile API authentication", () => {
     expect(SecureStore.setItemAsync).not.toHaveBeenCalled();
   });
 
+  it("reports an rpc that hit its timeout as a timeout, not as a canceled fetch", async () => {
+    vi.useFakeTimers();
+    vi.mocked(SecureStore.getItemAsync).mockResolvedValue("session-token");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_input: unknown, init?: { signal?: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () =>
+              reject(new Error("fetch failed: FetchRequestCanceledException")),
+            );
+          }),
+      ),
+    );
+
+    const pending = rpc("computer/status", { botId: "bot" });
+    const rejection = expect(pending).rejects.toThrow("Request timed out");
+    await vi.advanceTimersByTimeAsync(8_000);
+    await rejection;
+  });
+
+  it("reports a stalled rpc response body as a timeout", async () => {
+    vi.useFakeTimers();
+    vi.mocked(SecureStore.getItemAsync).mockResolvedValue("session-token");
+    const cancel = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(new ReadableStream({ cancel }))),
+    );
+
+    const pending = rpc("computer/status", { botId: "bot" });
+    const rejection = expect(pending).rejects.toThrow("Request timed out");
+    await vi.advanceTimersByTimeAsync(8_000);
+    await rejection;
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("reports a caller's cancellation with the caller's reason", async () => {
+    vi.useFakeTimers();
+    vi.mocked(SecureStore.getItemAsync).mockResolvedValue("session-token");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_input: unknown, init?: { signal?: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () =>
+              reject(new Error("fetch failed: FetchRequestCanceledException")),
+            );
+          }),
+      ),
+    );
+
+    const external = new AbortController();
+    const pending = rpc("computer/status", { botId: "bot" }, { signal: external.signal });
+    const rejection = expect(pending).rejects.toThrow("screen closed");
+    await vi.advanceTimersByTimeAsync(0);
+    external.abort(new Error("screen closed"));
+    await rejection;
+  });
+
+  it("lets a call opt into a longer timeout", async () => {
+    vi.useFakeTimers();
+    vi.mocked(SecureStore.getItemAsync).mockResolvedValue("session-token");
+    const fetchMock = vi.fn(
+      (_input: unknown, init?: { signal?: AbortSignal }) =>
+        new Promise<Response>((resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+          setTimeout(() => resolve(new Response(JSON.stringify({ json: { ok: true } }))), 20_000);
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pending = rpc<{ ok: boolean }>("computer/boot", { botId: "bot" }, { timeoutMs: 120_000 });
+    await vi.advanceTimersByTimeAsync(20_000);
+    await expect(pending).resolves.toEqual({ ok: true });
+  });
+
   it("clears the local session even when the sign-out request fails", async () => {
     vi.mocked(SecureStore.getItemAsync).mockResolvedValue("session-token");
     vi.stubGlobal(
@@ -353,6 +432,92 @@ describe("mobile API authentication", () => {
       }),
     );
     await expect(rpc("bots/get", { botId: "missing" })).rejects.toThrow("Bot does not exist");
+  });
+
+  it("blocks mobile message and attachment submission when AI sharing is declined", async () => {
+    vi.mocked(promptAiConsent).mockResolvedValue(false);
+    const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
+      jsonResponse({
+        json: {
+          scope: "account-space",
+          version: "2026-09-14",
+          recipients: [
+            { key: "provider", name: "Example AI", use: "model", detail: "", allowed: false },
+          ],
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    for (const proc of ["threads/send", "artifacts/create", "routines/create"]) {
+      await expect(rpc(proc, { botId: "bot-1", text: "private content" })).rejects.toThrow(
+        "AI data sharing",
+      );
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    for (const [url, init] of fetchMock.mock.calls) {
+      expect(String(url)).toContain("/rpc/aiConsent/status");
+      expect(init?.body).not.toContain("private content");
+    }
+  });
+
+  it.each([true, false])("explains the mobile upgrade requirement with JSON=%s", async (json) => {
+    const fetchMock = vi.fn(async () =>
+      json
+        ? jsonResponse({ error: { message: "Not found" } }, { status: 404 })
+        : new Response("404 Not Found", { status: 404 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(rpc("threads/send", { botId: "bot" })).rejects.toThrow("Update your server");
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it.each(["throws", "rejects", "stalls"])(
+    "reports the upgrade message when body cancellation %s",
+    async (mode) => {
+      const cancel = vi.fn(() => {
+        if (mode === "throws") throw new Error("cancel failed");
+        if (mode === "rejects") return Promise.reject(new Error("cancel failed"));
+        return new Promise<void>(() => {});
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => ({ status: 404, body: { cancel } })),
+      );
+      await expect(rpc("threads/send", { botId: "bot" })).rejects.toThrow("Update your server");
+      expect(cancel).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("records mobile consent before submitting and uses the deployment policy URL", async () => {
+    vi.mocked(promptAiConsent).mockResolvedValue(true);
+    const calls: string[] = [];
+    const recipient = {
+      key: "provider",
+      name: "Example AI",
+      use: "model",
+      detail: "",
+      allowed: false,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url) => {
+        const path = new URL(String(url)).pathname;
+        calls.push(path);
+        return jsonResponse({
+          json: path.endsWith("/status")
+            ? {
+                scope: "account-space",
+                version: "2026-09-14",
+                recipients: [recipient],
+                privacyUrl: "https://example.com/privacy",
+              }
+            : { ok: true },
+        });
+      }),
+    );
+    await rpc("threads/send", { botId: "bot-1", text: "authorized content" });
+    expect(calls).toEqual(["/rpc/aiConsent/status", "/rpc/aiConsent/allow", "/rpc/threads/send"]);
+    expect(promptAiConsent).toHaveBeenLastCalledWith(recipient, "https://example.com/privacy");
   });
 
   it("rejects an oversized RPC response before parsing it", async () => {
@@ -1497,6 +1662,28 @@ describe("mobile thread event reduction", () => {
       replyToMessageId: "message-1",
     });
     expect(next?.cursor).toBe(4);
+  });
+
+  it("appends a quoted reply carrying its excerpt", () => {
+    const initial = snapshot([mobileMessage("message-1", [{ kind: "text", text: "Done" }])]);
+
+    const next = applyMobileThreadEvent(initial, {
+      type: "thread.message.created",
+      seq: 4,
+      payload: {
+        messageId: "reply-1",
+        role: "user",
+        blocks: [{ kind: "text", text: "why this?" }],
+        replyToMessageId: "message-1",
+        replyQuote: "Done",
+      },
+    });
+
+    expect(next?.messages.find((message) => message.id === "reply-1")).toMatchObject({
+      role: "user",
+      replyToMessageId: "message-1",
+      replyQuote: "Done",
+    });
   });
 
   it("prepends ordered history pages without duplicating the boundary message", () => {
