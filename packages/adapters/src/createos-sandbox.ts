@@ -16,6 +16,7 @@ import type {
   ScreenSession,
 } from "@rakazo/adapter-kit";
 import { boundedSandboxCommandTimeoutMs } from "@rakazo/core";
+import { stopAllDesktopBrowsersCommand } from "@rakazo/core/node/desktop-runtime";
 import { sandboxIdleMs } from "./computer-idle.js";
 import { screenSessionKey } from "./computer-screens.js";
 import {
@@ -27,7 +28,6 @@ import {
   workspacePath,
 } from "./computer-support.js";
 import {
-  PORTABLE_BROWSER_STOP_COMMAND,
   PORTABLE_TRANSFER_BATCH_BYTES,
   shouldSkipPortableWorkspaceFile,
 } from "./computer-workspace.js";
@@ -380,7 +380,7 @@ print(json.dumps(out))
       (await this.currentBrowserUri(computer, context).catch(() => undefined)) ??
       this.lastBrowserUris.get(computer.providerRef) ??
       "about:blank";
-    await this.executeChecked(computer, ["bash", "-lc", PORTABLE_BROWSER_STOP_COMMAND], context);
+    await this.executeChecked(computer, ["bash", "-lc", stopAllDesktopBrowsersCommand()], context);
     try {
       yield* this.walkWorkspace(computer, "", context);
     } finally {
