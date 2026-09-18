@@ -93,9 +93,9 @@ export class CreateOSSandboxProvider implements SandboxProvider {
   private readonly dirtyWorkspaces = new Set<string>();
 
   constructor(private readonly options: CreateOSSandboxProviderOptions) {
-    this.baseUrl = (options.baseUrl ?? DEFAULT_CREATEOS_BASE_URL).replace(/\/+$/, "");
-    this.shape = options.shape ?? DEFAULT_CREATEOS_SHAPE;
-    this.rootfs = options.rootfs ?? DEFAULT_CREATEOS_ROOTFS;
+    this.baseUrl = (options.baseUrl?.trim() || DEFAULT_CREATEOS_BASE_URL).replace(/\/+$/, "");
+    this.shape = options.shape?.trim() || DEFAULT_CREATEOS_SHAPE;
+    this.rootfs = options.rootfs?.trim() || DEFAULT_CREATEOS_ROOTFS;
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
   }
 

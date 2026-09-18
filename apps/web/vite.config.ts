@@ -89,7 +89,7 @@ function attachNovncProxy(server: ViteDevServer | PreviewServer, secret: string,
       },
       (incoming) => {
         const responseHeaders = safeScreenProxyResponseHeaders(incoming.headers);
-        if (shouldInjectNovncStorageShim(responseHeaders)) {
+        if (shouldInjectNovncStorageShim(responseHeaders, target.hostname)) {
           const chunks: Buffer[] = [];
           incoming.on("data", (chunk: Buffer) => chunks.push(chunk));
           incoming.on("end", () => {
@@ -199,7 +199,10 @@ function attachNovncProxy(server: ViteDevServer | PreviewServer, secret: string,
   });
 }
 
-function shouldInjectNovncStorageShim(headers: http.IncomingHttpHeaders) {
+const NOVNC_STORAGE_SHIM_HOSTS = [".app.sb.createos.sh"];
+
+function shouldInjectNovncStorageShim(headers: http.IncomingHttpHeaders, hostname: string) {
+  if (!NOVNC_STORAGE_SHIM_HOSTS.some((suffix) => hostname.endsWith(suffix))) return false;
   if (headers["content-encoding"]) return false;
   const contentType = String(headers["content-type"] ?? "").toLowerCase();
   return contentType.includes("text/html") || contentType.includes("application/xhtml+xml");
