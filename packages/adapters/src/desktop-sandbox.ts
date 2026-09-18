@@ -699,7 +699,11 @@ function runCommand(
   return new Promise((resolve) => {
     const child = spawn(argv[0]!, argv.slice(1), {
       cwd,
-      env: { ...process.env, HOME: home },
+      env: {
+        ...process.env,
+        HOME: home,
+        ...(process.platform === "win32" ? { USERPROFILE: home } : {}),
+      },
       detached: process.platform !== "win32",
     });
     let stdout = "";

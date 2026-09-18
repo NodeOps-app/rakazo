@@ -36,6 +36,21 @@ const CREATEOS_WORKSPACE = "/home/desktop/rakazo-home";
 const DEFAULT_CREATEOS_BASE_URL = "https://api.sb.createos.sh";
 const DEFAULT_CREATEOS_SHAPE = "s-2vcpu-2gb";
 const DEFAULT_CREATEOS_ROOTFS = "desktop:1";
+const MAX_ERROR_BODY_CHARS = 2_000;
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+const BROWSER_PROFILE_DIR = ".browser-profiles";
+const BROWSER_PROFILE_CACHE_DIRS = new Set([
+  "Cache",
+  "Code Cache",
+  "CacheStorage",
+  "GPUCache",
+  "GrShaderCache",
+  "ShaderCache",
+  "Crashpad",
+  "component_crx_cache",
+  "startup_cache",
+  "cache2",
+]);
 const TRANSITIONAL_CREATEOS_STATUSES = new Set(["pausing", "resuming"]);
 const CHROME_CLEAN_EXIT_SCRIPT = `
 import json, os, sys
@@ -94,6 +109,7 @@ export class CreateOSSandboxProvider implements SandboxProvider {
 
   constructor(private readonly options: CreateOSSandboxProviderOptions) {
     this.baseUrl = (options.baseUrl?.trim() || DEFAULT_CREATEOS_BASE_URL).replace(/\/+$/, "");
+    assertSecureCreateOSBaseUrl(this.baseUrl);
     this.shape = options.shape?.trim() || DEFAULT_CREATEOS_SHAPE;
     this.rootfs = options.rootfs?.trim() || DEFAULT_CREATEOS_ROOTFS;
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
@@ -154,6 +170,7 @@ export class CreateOSSandboxProvider implements SandboxProvider {
       },
       context,
     );
+    if (!created?.id) throw new Error("CreateOS did not return a sandbox id");
     await this.waitUntilRunning(created.id, context);
     return this.ref(created.id, request.botId, true);
   }
@@ -190,7 +207,12 @@ export class CreateOSSandboxProvider implements SandboxProvider {
     try {
       result = await this.runCommand(computer, request, context, timeoutMs);
     } catch (error) {
-      if (context.signal.aborted || !isTimeoutAbort(error)) throw error;
+      if (context.signal.aborted) {
+        yield { type: "stderr", data: "command aborted\n" };
+        yield { type: "exit", code: 130 };
+        return;
+      }
+      if (!isTimeoutAbort(error)) throw error;
       yield { type: "stderr", data: `command timed out after ${timeoutMs} ms\n` };
       yield { type: "exit", code: 124 };
       return;
@@ -198,7 +220,7 @@ export class CreateOSSandboxProvider implements SandboxProvider {
     if (result.result?.stdout) yield { type: "stdout", data: result.result.stdout };
     if (result.result?.stderr) yield { type: "stderr", data: result.result.stderr };
     if (result.result?.error) yield { type: "stderr", data: `${result.result.error}\n` };
-    yield { type: "exit", code: result.result?.exit_code ?? 0 };
+    yield { type: "exit", code: result.result?.exit_code ?? (result.result?.error ? 1 : 0) };
   }
 
   async connectScreen(
@@ -383,8 +405,8 @@ print(json.dumps(out))
     await this.executeChecked(computer, ["bash", "-lc", stopAllDesktopBrowsersCommand()], context);
     try {
       yield* this.walkWorkspace(computer, "", context);
-    } finally {
       this.dirtyWorkspaces.delete(computer.providerRef);
+    } finally {
       if (context.operationId !== "stop" && context.operationId !== "computer.sleep") {
         await this.launchBrowser(computer, reopenUri, context, { settleMs: 0 }).catch(
           () => undefined,
@@ -422,15 +444,15 @@ print(json.dumps(out))
     const assignments = this.screenAssignments.get(computer.providerRef);
     const screenId = assignments?.get(screenKey);
     if (!assignments || !screenId) return;
-    assignments.delete(screenKey);
     if (screenId !== "screen-0") {
       await this.request(
         "DELETE",
         `/v1/sandboxes/${encodeURIComponent(computer.providerRef)}/computer/screens/${encodeURIComponent(screenId)}`,
         undefined,
         context,
-      ).catch(() => undefined);
+      ).catch(ignoreMissingCreateOSResource);
     }
+    assignments.delete(screenKey);
   }
 
   async stop(computer: ComputerRef, context: AdapterContext): Promise<void> {
@@ -439,7 +461,7 @@ print(json.dumps(out))
       `/v1/sandboxes/${encodeURIComponent(computer.providerRef)}/pause`,
       undefined,
       context,
-    );
+    ).catch(ignoreMissingCreateOSResource);
   }
 
   async destroy(computer: ComputerRef, context: AdapterContext): Promise<void> {
@@ -449,7 +471,7 @@ print(json.dumps(out))
       `/v1/sandboxes/${encodeURIComponent(computer.providerRef)}`,
       undefined,
       context,
-    );
+    ).catch(ignoreMissingCreateOSResource);
   }
 
   private forget(id: string): void {
@@ -801,8 +823,8 @@ for tab in tabs:
    */
   private async waitUntilSettled(id: string, context: AdapterContext): Promise<CreateOSView> {
     for (let attempt = 0; attempt < 120; attempt += 1) {
-      const current = await this.getSandbox(id, context);
-      if (!TRANSITIONAL_CREATEOS_STATUSES.has(current.status)) return current;
+      const current = await this.pollSandbox(id, context);
+      if (current && !TRANSITIONAL_CREATEOS_STATUSES.has(current.status)) return current;
       await delay(1_000, undefined, { signal: context.signal });
     }
     throw new Error("CreateOS sandbox did not settle");
@@ -810,14 +832,29 @@ for tab in tabs:
 
   private async waitUntilRunning(id: string, context: AdapterContext): Promise<void> {
     for (let attempt = 0; attempt < 120; attempt += 1) {
-      const current = await this.getSandbox(id, context);
-      if (current.status === "running") return;
-      if (current.status === "destroyed" || current.status === "failed") {
+      const current = await this.pollSandbox(id, context);
+      if (current?.status === "running") return;
+      if (current?.status === "destroyed" || current?.status === "failed") {
         throw new Error(`CreateOS sandbox is ${current.status}`);
       }
       await delay(1_000, undefined, { signal: context.signal });
     }
     throw new Error("CreateOS sandbox did not become running");
+  }
+
+  /** Returns undefined for a transient control-plane failure so the caller keeps polling. */
+  private async pollSandbox(
+    id: string,
+    context: AdapterContext,
+  ): Promise<CreateOSView | undefined> {
+    try {
+      return await this.getSandbox(id, context);
+    } catch (error) {
+      if (error instanceof CreateOSHttpError && isTransientCreateOSHttpStatus(error.status)) {
+        return undefined;
+      }
+      throw error;
+    }
   }
 
   private getJson<T>(path: string, context: AdapterContext): Promise<T> {
@@ -853,7 +890,10 @@ for tab in tabs:
       timeoutMs,
     );
     const payload = (await response.json()) as { status?: string; data?: T; message?: string };
-    if (payload.status === "success") return payload.data as T;
+    if (payload.status === "success") {
+      if (payload.data === undefined) throw new Error("CreateOS response did not include data");
+      return payload.data as T;
+    }
     if (payload.status && payload.status !== "success") {
       throw new Error(
         payload.message ||
@@ -916,7 +956,7 @@ for tab in tabs:
     const signal = AbortSignal.any([context.signal, timeout]);
     const response = await this.fetchImpl(url, { method, headers, body, signal });
     if (!response.ok) {
-      const message = await response.text().catch(() => "");
+      const message = (await response.text().catch(() => "")).slice(0, MAX_ERROR_BODY_CHARS);
       throw new CreateOSHttpError(response.status, message || response.statusText);
     }
     return response;
@@ -942,6 +982,21 @@ class CreateOSHttpError extends Error {
   }
 }
 
+function assertSecureCreateOSBaseUrl(baseUrl: string): void {
+  const { protocol, hostname } = new URL(baseUrl);
+  if (protocol === "https:") return;
+  if (protocol === "http:" && LOOPBACK_HOSTS.has(hostname)) return;
+  throw new Error("CreateOS base URL must use https unless it points at loopback");
+}
+
+function isMissingCreateOSResource(error: unknown): boolean {
+  return error instanceof CreateOSHttpError && error.status === 404;
+}
+
+function ignoreMissingCreateOSResource(error: unknown): void {
+  if (!isMissingCreateOSResource(error)) throw error;
+}
+
 function isTimeoutAbort(error: unknown): boolean {
   return error instanceof Error && error.name === "TimeoutError";
 }
@@ -951,11 +1006,13 @@ function isTransientCreateOSHttpStatus(status: number): boolean {
 }
 
 function shouldSkipCreateOSWorkspaceFile(relative: string): boolean {
-  return (
-    relative === ".browser-profiles" ||
-    relative.startsWith(".browser-profiles/") ||
-    shouldSkipPortableWorkspaceFile(relative)
-  );
+  if (
+    relative.startsWith(`${BROWSER_PROFILE_DIR}/`) &&
+    relative.split("/").some((segment) => BROWSER_PROFILE_CACHE_DIRS.has(segment))
+  ) {
+    return true;
+  }
+  return shouldSkipPortableWorkspaceFile(relative);
 }
 
 function createosCwd(cwd: string | undefined): string {

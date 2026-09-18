@@ -1,4 +1,4 @@
-import type { ComputerRef, PortableFile } from "@rakazo/adapter-kit";
+import type { ComputerRef, PortableFile, ProcessEvent } from "@rakazo/adapter-kit";
 import { describe, expect, it } from "vitest";
 import { CreateOSSandboxProvider } from "./createos-sandbox.js";
 
@@ -181,5 +181,73 @@ describe("CreateOSSandboxProvider", () => {
 
     await target.destroy(computer, context);
     expect(fixture.calls).toContain("DELETE /v1/sandboxes/sbx-1");
+  });
+  it("treats teardown of a missing sandbox as done", async () => {
+    const gone = (async () =>
+      new Response(JSON.stringify({ status: "error", message: "not found" }), {
+        status: 404,
+      })) as typeof fetch;
+    const target = new CreateOSSandboxProvider({ apiKey: "test-key", fetch: gone });
+
+    await expect(target.stop(computer, context)).resolves.toBeUndefined();
+    await expect(target.destroy(computer, context)).resolves.toBeUndefined();
+  });
+
+  it("reports a cancelled command as an abort", async () => {
+    const controller = new AbortController();
+    const fixture = createosFixture();
+    const aborting = (async (input: URL | RequestInfo, init?: RequestInit) => {
+      if (String(input).endsWith("/exec")) {
+        controller.abort();
+        throw Object.assign(new Error("aborted"), { name: "AbortError" });
+      }
+      return fixture.fetchImpl(input, init);
+    }) as typeof fetch;
+    const target = new CreateOSSandboxProvider({ apiKey: "test-key", fetch: aborting });
+
+    const events: ProcessEvent[] = [];
+    for await (const event of target.execute(
+      computer,
+      { argv: ["sleep", "30"] },
+      { ...context, signal: controller.signal },
+    )) {
+      events.push(event);
+    }
+
+    expect(events.at(-1)).toEqual({ type: "exit", code: 130 });
+  });
+
+  it("fails a command that reports an error without an exit code", async () => {
+    const failing = (async (input: URL | RequestInfo) => {
+      if (String(input).endsWith("/exec")) {
+        return new Response(
+          JSON.stringify({ status: "success", data: { result: { error: "no such file" } } }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({ status: "success", data: { id: "sbx-1", status: "running" } }),
+        {
+          headers: { "content-type": "application/json" },
+        },
+      );
+    }) as typeof fetch;
+    const target = new CreateOSSandboxProvider({ apiKey: "test-key", fetch: failing });
+
+    const events: ProcessEvent[] = [];
+    for await (const event of target.execute(computer, { argv: ["cat", "missing"] }, context)) {
+      events.push(event);
+    }
+
+    expect(events.at(-1)).toEqual({ type: "exit", code: 1 });
+  });
+
+  it("refuses a plaintext base url outside loopback", () => {
+    expect(
+      () => new CreateOSSandboxProvider({ apiKey: "test-key", baseUrl: "http://api.example.com" }),
+    ).toThrow(/https/);
+    expect(
+      () => new CreateOSSandboxProvider({ apiKey: "test-key", baseUrl: "http://127.0.0.1:8080" }),
+    ).not.toThrow();
   });
 });
