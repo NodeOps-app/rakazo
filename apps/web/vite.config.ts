@@ -312,10 +312,11 @@ function cspWithStorageShimHash(header: string | string[] | undefined) {
 }
 
 function findCspDirective(directives: string[], name: string) {
-  const prefix = `${name} `;
-  const index = directives.findIndex(
-    (directive) => directive === name || directive.startsWith(prefix),
-  );
+  const normalized = name.toLowerCase();
+  const index = directives.findIndex((directive) => {
+    const [directiveName] = directive.trim().split(/[\t\n\f\r ]+/, 1);
+    return directiveName?.toLowerCase() === normalized;
+  });
   return index >= 0 ? index : undefined;
 }
 
