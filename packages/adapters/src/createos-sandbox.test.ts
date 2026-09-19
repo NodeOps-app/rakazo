@@ -1,6 +1,10 @@
 import type { ComputerRef, PortableFile, ProcessEvent } from "@rakazo/adapter-kit";
-import { describe, expect, it } from "vitest";
-import { CreateOSSandboxProvider } from "./createos-sandbox.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+  CreateOSSandboxProvider,
+  MAX_CREATEOS_ERROR_RESPONSE_BYTES,
+  MAX_CREATEOS_SUCCESS_RESPONSE_BYTES,
+} from "./createos-sandbox.js";
 
 const context = {
   operationId: "test",
@@ -249,5 +253,38 @@ describe("CreateOSSandboxProvider", () => {
     expect(
       () => new CreateOSSandboxProvider({ apiKey: "test-key", baseUrl: "http://127.0.0.1:8080" }),
     ).not.toThrow();
+  });
+
+  it("rejects a declared oversized success response without buffering it", async () => {
+    const cancel = vi.fn();
+    const fetchImpl = (async () =>
+      new Response(new ReadableStream({ cancel }), {
+        headers: { "content-length": String(MAX_CREATEOS_SUCCESS_RESPONSE_BYTES + 1) },
+      })) as typeof fetch;
+
+    await expect(
+      new CreateOSSandboxProvider({ apiKey: "test-key", fetch: fetchImpl }).provision(
+        { botId: "bot-a", homePath: "/unused" },
+        context,
+      ),
+    ).rejects.toThrow(`CreateOS response exceeds ${MAX_CREATEOS_SUCCESS_RESPONSE_BYTES} bytes`);
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
+  });
+
+  it("does not buffer an oversized error body", async () => {
+    const cancel = vi.fn();
+    const fetchImpl = (async () =>
+      new Response(new ReadableStream({ cancel }), {
+        status: 500,
+        headers: { "content-length": String(MAX_CREATEOS_ERROR_RESPONSE_BYTES + 1) },
+      })) as typeof fetch;
+
+    await expect(
+      new CreateOSSandboxProvider({ apiKey: "test-key", fetch: fetchImpl }).destroy(
+        computer,
+        context,
+      ),
+    ).rejects.toThrow(/500/);
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
   });
 });

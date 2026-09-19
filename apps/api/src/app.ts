@@ -58,6 +58,7 @@ import {
   reconcileCloudAgents,
   reconcileComputerUpdates,
   removePiUserSessions,
+  sandboxProviderOptionsFromEnv,
   ScriptedAgentRuntime,
   SmtpEmailProvider,
   SpaceMemoryProviderResolver,
@@ -220,16 +221,13 @@ export async function createApp(
   const sandbox: SandboxProvider =
     sandboxOverride ??
     createRunSandbox(env.sandboxProvider, {
+      ...sandboxProviderOptionsFromEnv(),
       supervisorUrl: env.sandboxSupervisorUrl,
       supervisorToken: env.sandboxSupervisorToken,
       e2bApiKey: env.e2bApiKey,
       daytonaApiKey: env.daytonaApiKey,
       daytonaApiUrl: env.daytonaApiUrl,
       daytonaTarget: env.daytonaTarget,
-      createosApiKey: env.createosApiKey,
-      createosBaseUrl: env.createosBaseUrl,
-      createosShape: env.createosShape,
-      createosRootfs: env.createosRootfs,
       boxApiKey: env.boxApiKey,
       boxApiUrl: env.boxApiUrl,
       dataDir: env.dataDir,

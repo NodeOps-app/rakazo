@@ -31,12 +31,17 @@ import {
   PORTABLE_TRANSFER_BATCH_BYTES,
   shouldSkipPortableWorkspaceFile,
 } from "./computer-workspace.js";
+import { readBodyCapped } from "./web-ssrf.js";
 
 const CREATEOS_WORKSPACE = "/home/desktop/rakazo-home";
 const DEFAULT_CREATEOS_BASE_URL = "https://api.sb.createos.sh";
 const DEFAULT_CREATEOS_SHAPE = "s-2vcpu-2gb";
 const DEFAULT_CREATEOS_ROOTFS = "desktop:1";
+export const MAX_CREATEOS_ERROR_RESPONSE_BYTES = 8 * 1024;
+export const MAX_CREATEOS_SUCCESS_RESPONSE_BYTES = 16 * 1024 * 1024;
 const MAX_ERROR_BODY_CHARS = 2_000;
+const CREATEOS_ERROR_RESPONSE_TIMEOUT_MS = 1_000;
+const CREATEOS_SUCCESS_RESPONSE_TIMEOUT_MS = 30_000;
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const BROWSER_PROFILE_DIR = ".browser-profiles";
 const BROWSER_PROFILE_CACHE_DIRS = new Set([
@@ -381,6 +386,7 @@ print(json.dumps(out))
       `/v1/sandboxes/${encodeURIComponent(computer.providerRef)}/files?path=${encodeURIComponent(target)}`,
       context,
       "application/octet-stream",
+      options?.maxBytes ?? MAX_CREATEOS_SUCCESS_RESPONSE_BYTES,
     );
   }
 
@@ -889,7 +895,10 @@ for tab in tabs:
       body === undefined ? undefined : "application/json",
       timeoutMs,
     );
-    const payload = (await response.json()) as { status?: string; data?: T; message?: string };
+    const payload = await readCreateOSJson<{ status?: string; data?: T; message?: string }>(
+      response,
+      context.signal,
+    );
     if (payload.status === "success") {
       if (payload.data === undefined) throw new Error("CreateOS response did not include data");
       return payload.data as T;
@@ -910,6 +919,7 @@ for tab in tabs:
     path: string,
     context: AdapterContext,
     accept: string,
+    maxBytes = MAX_CREATEOS_SUCCESS_RESPONSE_BYTES,
   ): Promise<Uint8Array> {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
@@ -922,7 +932,7 @@ for tab in tabs:
           undefined,
           accept,
         );
-        return new Uint8Array(await response.arrayBuffer());
+        return await readCreateOSBody(response, maxBytes, context.signal);
       } catch (error) {
         if (
           attempt === 2 ||
@@ -956,7 +966,7 @@ for tab in tabs:
     const signal = AbortSignal.any([context.signal, timeout]);
     const response = await this.fetchImpl(url, { method, headers, body, signal });
     if (!response.ok) {
-      const message = (await response.text().catch(() => "")).slice(0, MAX_ERROR_BODY_CHARS);
+      const message = await readCreateOSErrorMessage(response, signal);
       throw new CreateOSHttpError(response.status, message || response.statusText);
     }
     return response;
@@ -978,7 +988,7 @@ class CreateOSHttpError extends Error {
     readonly status: number,
     message: string,
   ) {
-    super(message);
+    super(message || `CreateOS request failed (${status})`);
   }
 }
 
@@ -987,6 +997,61 @@ function assertSecureCreateOSBaseUrl(baseUrl: string): void {
   if (protocol === "https:") return;
   if (protocol === "http:" && LOOPBACK_HOSTS.has(hostname)) return;
   throw new Error("CreateOS base URL must use https unless it points at loopback");
+}
+
+async function readCreateOSJson<T>(response: Response, signal: AbortSignal): Promise<T> {
+  const bytes = await readCreateOSBody(response, MAX_CREATEOS_SUCCESS_RESPONSE_BYTES, signal);
+  return JSON.parse(new TextDecoder().decode(bytes)) as T;
+}
+
+async function readCreateOSBody(
+  response: Response,
+  maxBytes: number,
+  signal: AbortSignal,
+): Promise<Uint8Array> {
+  const declared = Number(response.headers.get("content-length") ?? 0);
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    cancelCreateOSResponseBody(response);
+    throw new Error(`CreateOS response exceeds ${maxBytes} bytes`);
+  }
+  const readSignal = AbortSignal.any([
+    signal,
+    AbortSignal.timeout(CREATEOS_SUCCESS_RESPONSE_TIMEOUT_MS),
+  ]);
+  try {
+    return await readBodyCapped(response, maxBytes, readSignal);
+  } catch (error) {
+    if (error instanceof Error && error.message === "Response is too large") {
+      throw new Error(`CreateOS response exceeds ${maxBytes} bytes`, { cause: error });
+    }
+    throw error;
+  }
+}
+
+async function readCreateOSErrorMessage(response: Response, signal: AbortSignal): Promise<string> {
+  const declared = Number(response.headers.get("content-length") ?? 0);
+  if (Number.isFinite(declared) && declared > MAX_CREATEOS_ERROR_RESPONSE_BYTES) {
+    cancelCreateOSResponseBody(response);
+    return "";
+  }
+  try {
+    const readSignal = AbortSignal.any([
+      signal,
+      AbortSignal.timeout(CREATEOS_ERROR_RESPONSE_TIMEOUT_MS),
+    ]);
+    const bytes = await readBodyCapped(response, MAX_CREATEOS_ERROR_RESPONSE_BYTES, readSignal);
+    return new TextDecoder().decode(bytes).slice(0, MAX_ERROR_BODY_CHARS);
+  } catch {
+    return "";
+  }
+}
+
+function cancelCreateOSResponseBody(response: Response): void {
+  try {
+    void Promise.resolve(response.body?.cancel()).catch(() => undefined);
+  } catch {
+    // Error diagnostics are best-effort and must not delay the operation failure.
+  }
 }
 
 function isMissingCreateOSResource(error: unknown): boolean {
